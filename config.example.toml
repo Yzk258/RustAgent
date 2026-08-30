@@ -1,0 +1,14 @@
+[llm]
+base_url = "https://api.deepseek.com/v1"
+api_key = "sk-xxxx"
+model = "deepseek-chat"
+context_length = 32768
+price_input_per_m = 0.27
+price_output_per_m = 1.1
+token_budget = 2000000
+
+[output]
+download_dir = "./downloads"
+
+[database]
+path = "./userdata.json"
