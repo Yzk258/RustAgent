@@ -1,4 +1,5 @@
 mod agent;
+mod cli;
 mod config;
 mod database;
 mod history;
@@ -6,11 +7,11 @@ mod llm;
 mod modrinth;
 mod pipeline;
 mod tools;
+mod ui;
 
-use agent::Agent;
+use agent::new_agent;
 use anyhow::{bail, Result};
-use llm::LlmClient;
-use std::io::Write;
+use cli::{paint, ACCENT, DIM, GREEN, RED, YELLOW};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tools::ToolRegistry;
@@ -19,6 +20,7 @@ use std::io::Read as _;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    cli::enable_vt();
     let args: Vec<String> = std::env::args().collect();
     let cfg = config::load("config.toml")?;
 
@@ -28,25 +30,36 @@ async fn main() -> Result<()> {
     if args.len() > 1 && args[1] == "demo" {
         return pipeline::run_demo(&cfg, args.get(2).map(|s| s.as_str())).await;
     }
+    if args.len() > 1 && args[1] == "ui" {
+        return ui::serve(cfg).await;
+    }
     if args.len() > 2 && args[1] == "repair" {
         let modrinth = modrinth::ModrinthClient::new()?;
         let registry = ToolRegistry::new(modrinth, &cfg.output.download_dir, &cfg.db_path());
-        let result = registry.execute("repair_pack", &args[2..].join(" ")).await?;
+        let result = registry.execute("repair_pack", &args[2..].join(" "), None).await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
 
-    let agent = Arc::new(tokio::sync::Mutex::new(new_agent(&cfg).await?));
+    let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let agent = Arc::new(tokio::sync::Mutex::new(new_agent(&cfg.llm, &cfg.output.download_dir, &cfg.db_path(), interrupt).await?));
     let mut reader = BufReader::new(tokio::io::stdin());
 
-    println!("RustAgent v0.2 — MC 模组管理 Agent (测试版)");
-    println!("命令: /new 新会话 | /save 保存 | /load 加载 | /stats 数据库与用量 | /quit 退出");
-    println!("任务执行中按 Ctrl+C 可打断当前任务 (不会退出程序)");
-    println!("示例: 我想要 1.21.1 fabric 的生存整合包, 带点探索和装饰内容\n");
+    // 会话预设 (与 Web UI 预设栏同源): 每条消息注入 [界面预设: ...] 前缀
+    let mut preset_gv: Option<String> = None;
+    let mut preset_loader: Option<String> = None;
+    let mut preset_limit: Option<u32> = None;
+
+    cli::print_banner(&cfg);
+    println!();
 
     loop {
-        print!("> ");
-        std::io::stdout().flush()?;
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(gv) = &preset_gv { parts.push(gv.clone()); }
+        if let Some(ld) = &preset_loader { parts.push(ld.clone()); }
+        if let Some(n) = preset_limit { parts.push(format!("×{n}")); }
+        let tag = if parts.is_empty() { None } else { Some(parts.join("·")) };
+        cli::print_prompt(tag.as_deref());
         let mut line = String::new();
         let n = reader.read_line(&mut line).await?;
         if n == 0 {
@@ -56,21 +69,22 @@ async fn main() -> Result<()> {
             "" => continue,
             "/quit" | "/exit" => break,
             "/new" => {
-                *agent.lock().await = new_agent(&cfg).await?;
-                println!("已开启新会话");
+                let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                *agent.lock().await = new_agent(&cfg.llm, &cfg.output.download_dir, &cfg.db_path(), interrupt).await?;
+                println!("{}", paint(GREEN, "✓ 已开启新会话"));
             }
             "/save" => {
                 let ag = agent.lock().await;
                 match history::save(&ag) {
-                    Ok(p) => println!("已保存: {p}"),
-                    Err(e) => eprintln!("[错误] {e:#}"),
+                    Ok(p) => println!("{} {}", paint(GREEN, "✓ 已保存"), paint(DIM, &p)),
+                    Err(e) => eprintln!("{}", paint(RED, &format!("✗ {e:#}"))),
                 }
             }
             "/load" => {
                 let mut ag = agent.lock().await;
                 match history::load_latest(&mut ag) {
-                    Ok(p) => println!("已加载: {p}"),
-                    Err(e) => eprintln!("[错误] {e:#}"),
+                    Ok(p) => println!("{} {}", paint(GREEN, "✓ 已加载"), paint(DIM, &p)),
+                    Err(e) => eprintln!("{}", paint(RED, &format!("✗ {e:#}"))),
                 }
             }
             "/stats" => {
@@ -91,9 +105,63 @@ async fn main() -> Result<()> {
                 );
                 println!("本次会话: {}", ag.usage_summary());
             }
+            cmd if cmd.starts_with("/set") => {
+                let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+                let apply = |gv: &mut Option<String>, ld: &mut Option<String>, n: &mut Option<u32>, args: &[&str]| {
+                    if args.is_empty() {
+                        println!("{}", paint(DIM, "用法: /set 版本=1.21.1 加载器=fabric 数量=10 (键: 版本/加载器/数量)"));
+                    }
+                    for token in args {
+                        let Some((key, val)) = token.split_once('=') else {
+                            eprintln!("{}", paint(RED, &format!("✗ 格式: /set 版本=1.21.1 加载器=fabric 数量=10 (键: 版本/加载器/数量)")));
+                            continue;
+                        };
+                        match key {
+                            "版本" | "version" | "v" => {
+                                if pipeline::is_valid_game_version(val) {
+                                    *gv = Some(val.to_string());
+                                } else {
+                                    eprintln!("{}", paint(RED, &format!("✗ 无效版本 '{val}', 应类似 1.21.1")));
+                                }
+                            }
+                            "加载器" | "loader" | "l" => {
+                                if pipeline::is_valid_loader(val) {
+                                    *ld = Some(val.to_string());
+                                } else {
+                                    eprintln!("{}", paint(RED, &format!("✗ 无效加载器 '{val}', 可选: fabric / forge / neoforge / quilt")));
+                                }
+                            }
+                            "数量" | "limit" | "n" => match val.parse::<u32>() {
+                                Ok(x) if (1..=20).contains(&x) => *n = Some(x),
+                                _ => eprintln!("{}", paint(RED, "✗ 数量需为 1-20 的整数 (单次对话上限 20)")),
+                            },
+                            _ => eprintln!("{}", paint(RED, &format!("✗ 未知预设项 '{key}', 可选: 版本 / 加载器 / 数量"))),
+                        }
+                    }
+                };
+                apply(&mut preset_gv, &mut preset_loader, &mut preset_limit, &args);
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(gv) = &preset_gv { parts.push(format!("版本={gv}")); }
+                if let Some(ld) = &preset_loader { parts.push(format!("加载器={ld}")); }
+                if let Some(n) = preset_limit { parts.push(format!("数量={n}")); }
+                if parts.is_empty() {
+                    println!("当前预设: 无 (消息将原样发送)");
+                } else {
+                    println!("{} {}", paint(GREEN, "✓ 当前预设:"), paint(ACCENT, &parts.join(" ")));
+                }
+            }
             input => {
                 let ag = Arc::clone(&agent);
-                let input = input.to_string();
+                // 注入会话预设前缀 (与 Web 预设栏同源逻辑), 让 agent 直接采用不再追问
+                let input = match pipeline::preset_prefix(
+                    preset_gv.as_deref(),
+                    preset_loader.as_deref(),
+                    preset_limit,
+                ) {
+                    Some(p) => format!("{p}{input}"),
+                    None => input.to_string(),
+                };
+                cli::print_busy_hint();
                 let mut turn = tokio::spawn(async move {
                     let mut guard = ag.lock().await;
                     guard.run_turn(&input).await
@@ -102,13 +170,13 @@ async fn main() -> Result<()> {
                     res = &mut turn => {
                         match res {
                             Ok(Ok(())) => {}
-                            Ok(Err(e)) => eprintln!("[错误] {e:#}"),
-                            Err(e) => eprintln!("[错误] 任务异常: {e}"),
+                            Ok(Err(e)) => eprintln!("{}", paint(RED, &format!("✗ {e:#}"))),
+                            Err(e) => eprintln!("{}", paint(RED, &format!("✗ 任务异常: {e}"))),
                         }
                     }
                     _ = tokio::signal::ctrl_c() => {
                         turn.abort();
-                        println!("\n[已打断当前任务]");
+                        println!("\n{}", paint(YELLOW, "⏸ 已打断当前任务"));
                     }
                 }
             }
@@ -116,16 +184,10 @@ async fn main() -> Result<()> {
     }
     let ag = agent.lock().await;
     let db = database::UserDatabase::load(&cfg.db_path());
+    println!("{}", paint(DIM, "── 会话结束 ──────────────────────"));
     println!("数据库: {}", db.summary());
     println!("本次会话用量: {}", ag.usage_summary());
     Ok(())
-}
-
-async fn new_agent(cfg: &config::Config) -> Result<Agent> {
-    let llm = LlmClient::new(cfg.llm.clone())?;
-    let modrinth = modrinth::ModrinthClient::new()?;
-    let registry = ToolRegistry::new(modrinth, &cfg.output.download_dir, &cfg.db_path());
-    Ok(Agent::new(llm, registry, cfg.llm.clone()))
 }
 
 async fn selftest(cfg: &config::Config) -> Result<()> {
@@ -155,6 +217,7 @@ async fn selftest(cfg: &config::Config) -> Result<()> {
         .execute(
             "build_modpack",
             r#"{"name":"RustAgent-selftest","game_version":"1.21.1","loader":"fabric","mod_slugs":["sodium","fabric-api"]}"#,
+            None,
         )
         .await?;
     println!("{}", serde_json::to_string_pretty(&val)?);

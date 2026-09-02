@@ -23,6 +23,10 @@ impl Message {
         Self { role: "user".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None }
     }
 
+    pub fn assistant(content: &str) -> Self {
+        Self { role: "assistant".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None }
+    }
+
     pub fn tool(call_id: &str, content: String) -> Self {
         Self { role: "tool".into(), content: Some(content), tool_calls: None, tool_call_id: Some(call_id.into()) }
     }

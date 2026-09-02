@@ -8,6 +8,21 @@ use std::path::PathBuf;
 use crate::llm::ToolDef;
 use crate::modrinth::{ModrinthClient, VersionFile};
 
+/// 工具执行过程中的阶段性进展上报通道 (如 "正在收集 mod x (2/8)")。
+/// 传 None 表示调用方不关心进展 (如 repair 子命令)。
+pub type ProgressTx = tokio::sync::mpsc::UnboundedSender<String>;
+
+fn report(progress: Option<&ProgressTx>, msg: String) {
+    if let Some(tx) = progress {
+        let _ = tx.send(msg);
+    }
+}
+
+/// 单包用户所选 mod 数上限 (多次对话再合包同样按此判断)。
+/// 注意: 依赖自动补全 (auto_added) 与启动器报错触发的修复补入 (repair_pack) 不计入 ——
+/// 这两类是正确性需要, 不是用户主动扩包。设上限是为了考虑轻量化, 敬请谅解。
+const MAX_USER_MODS_PER_PACK: usize = 100;
+
 pub struct ToolRegistry {
     modrinth: ModrinthClient,
     download_dir: PathBuf,
@@ -151,14 +166,19 @@ impl ToolRegistry {
         ]
     }
 
-    pub async fn execute(&self, name: &str, arguments: &str) -> Result<serde_json::Value> {
+    pub async fn execute(
+        &self,
+        name: &str,
+        arguments: &str,
+        progress: Option<&ProgressTx>,
+    ) -> Result<serde_json::Value> {
         match name {
             "search_mods" => self.search_mods(arguments).await,
-            "build_modpack" => self.build_modpack(arguments).await,
+            "build_modpack" => self.build_modpack(arguments, progress).await,
             "record_feedback" => self.record_feedback(arguments).await,
             "get_user_profile" => self.get_user_profile().await,
             "recommend_new_mods" => self.recommend_new(arguments).await,
-            "repair_pack" => self.repair_pack(arguments).await,
+            "repair_pack" => self.repair_pack(arguments, progress).await,
             _ => bail!("未知工具: {name}"),
         }
     }
@@ -224,10 +244,21 @@ impl ToolRegistry {
         Ok(json!({ "query_used": query, "total_hits": resp.total_hits, "mods": mods }))
     }
 
-    async fn build_modpack(&self, args: &str) -> Result<serde_json::Value> {
+    async fn build_modpack(
+        &self,
+        args: &str,
+        progress: Option<&ProgressTx>,
+    ) -> Result<serde_json::Value> {
         let a: BuildArgs = serde_json::from_str(args)?;
         if a.mod_slugs.is_empty() {
             bail!("mod 列表为空");
+        }
+        // 只统计用户主动挑选的 mod; 依赖补全走 auto_added, 修复补入走 repair_pack, 均不计入
+        if a.mod_slugs.len() > MAX_USER_MODS_PER_PACK {
+            bail!(
+                "所选 mod {} 个, 超出单包上限 {MAX_USER_MODS_PER_PACK} (依赖自动补全与报错修复补入不计入) —— 为考虑轻量化, 敬请谅解",
+                a.mod_slugs.len()
+            );
         }
         if a.loader != "fabric" {
             bail!("v0 暂只支持 fabric 加载器");
@@ -239,6 +270,7 @@ impl ToolRegistry {
         let mut conflicts: Vec<serde_json::Value> = Vec::new();
         let mut total_size: u64 = 0;
 
+        report(progress, format!("解析依赖闭包 ({} 个 mod)", a.mod_slugs.len()));
         let (final_slugs, auto_added, closure_conflicts) = crate::pipeline::dependency_closure(
             &self.modrinth,
             &a.game_version,
@@ -246,11 +278,21 @@ impl ToolRegistry {
             &a.mod_slugs,
         )
         .await?;
+        report(
+            progress,
+            format!(
+                "依赖闭包解析完成: 共 {} 个 mod (自动补充前置 {} 个)",
+                final_slugs.len(),
+                auto_added.len()
+            ),
+        );
         for c in &closure_conflicts {
             conflicts.push(json!({ "issue": c }));
         }
 
-        for slug in &final_slugs {
+        let total = final_slugs.len();
+        for (i, slug) in final_slugs.iter().enumerate() {
+            report(progress, format!("正在收集 mod {slug} ({}/{})", i + 1, total));
             if !seen.insert(slug.clone()) {
                 conflicts.push(json!({ "slug": slug, "issue": "重复添加" }));
                 continue;
@@ -305,6 +347,7 @@ impl ToolRegistry {
             bail!("没有任何 mod 能解析出兼容版本, 组包中止");
         }
 
+        report(progress, "获取 fabric loader 版本".to_string());
         let loader_version = self.fabric_loader_version().await?;
         let mut deps = BTreeMap::new();
         deps.insert("minecraft".to_string(), a.game_version.clone());
@@ -320,6 +363,7 @@ impl ToolRegistry {
             dependencies: deps,
         };
 
+        report(progress, format!("写入整合包文件 {} 个 mod", summaries.len()));
         std::fs::create_dir_all(&self.download_dir)?;
         let safe_name = a.name.replace(['/', '\\', ':', '*'], "-");
         let out_path = self.download_dir.join(format!("{safe_name}.mrpack"));
@@ -422,7 +466,11 @@ impl ToolRegistry {
         Ok(json!({ "recommendations": mods, "db_summary": db.summary() }))
     }
 
-    async fn repair_pack(&self, args: &str) -> Result<serde_json::Value> {
+    async fn repair_pack(
+        &self,
+        args: &str,
+        progress: Option<&ProgressTx>,
+    ) -> Result<serde_json::Value> {
         #[derive(Deserialize)]
         struct Args {
             pack_name: String,
@@ -481,6 +529,7 @@ impl ToolRegistry {
             })
             .unwrap_or_default();
 
+        report(progress, format!("解析依赖闭包 ({} 个 mod)", a.add_slugs.len()));
         let (final_slugs, auto_added, closure_conflicts) = crate::pipeline::dependency_closure(
             &self.modrinth,
             &game_version,
@@ -495,7 +544,9 @@ impl ToolRegistry {
             .get_mut("files")
             .and_then(|f| f.as_array_mut())
             .ok_or_else(|| anyhow::anyhow!("索引 files 异常"))?;
-        for slug in &final_slugs {
+        let total = final_slugs.len();
+        for (i, slug) in final_slugs.iter().enumerate() {
+            report(progress, format!("正在收集 mod {slug} ({}/{})", i + 1, total));
             let versions = match self.modrinth.versions(slug, &game_version, loader).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -536,6 +587,7 @@ impl ToolRegistry {
 
         let total_mods = files_arr.len();
 
+        report(progress, format!("写入整合包文件 (共 {total_mods} 个 mod)"));
         std::fs::create_dir_all(&self.download_dir)?;
         let out_file = std::fs::File::create(&pack_path)?;
         let mut zip = zip::ZipWriter::new(out_file);

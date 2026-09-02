@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RustAgent · MC 模组管理助手</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- 顶栏: 品牌名 / 当前模型 / 连接状态 -->
+    <header id="topbar">
+      <div class="brand">⛏ RustAgent <span class="ver" id="ver"></span></div>
+      <div class="model" id="model-name"></div>
+      <div class="status">
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">连接中…</span>
+      </div>
+    </header>
+
+    <!-- 侧栏: 每张 .card 是一个独立面板, 新增功能面板时复制一个 section 并在 app.js 里补数据加载 -->
+    <aside id="sidebar">
+      <section class="card">
+        <div class="card-head">
+          <h3>会话</h3>
+          <button id="btn-open-sessions">打开目录</button>
+        </div>
+        <div class="btn-row">
+          <button id="btn-new">新会话</button>
+          <button id="btn-save">保存</button>
+          <button id="btn-load">加载</button>
+        </div>
+        <ul class="pack-list" id="session-list"></ul>
+      </section>
+
+      <section class="card">
+        <h3>统计</h3>
+        <div class="kv" id="stat-usage">-</div>
+        <div class="kv" id="stat-db">-</div>
+        <div class="tags" id="tag-weights"></div>
+      </section>
+
+      <section class="card">
+        <h3>可用工具</h3>
+        <ul class="tool-list" id="tool-list"></ul>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h3>已生成整合包</h3>
+          <button id="btn-open-dir">打开目录</button>
+        </div>
+        <div class="kv dim" id="pack-dir"></div>
+        <ul class="pack-list" id="pack-list"></ul>
+      </section>
+    </aside>
+
+    <!-- 主聊天区 -->
+    <main id="chat">
+      <div id="messages"></div>
+      <div id="presetbar">
+        <label>MC 版本
+          <input id="sel-version" list="version-list" placeholder="如 1.21.1" autocomplete="off">
+          <datalist id="version-list">
+            <option value="1.21.1"></option>
+            <option value="1.21.4"></option>
+            <option value="1.21.5"></option>
+            <option value="1.20.1"></option>
+            <option value="1.20.4"></option>
+            <option value="1.19.2"></option>
+            <option value="1.18.2"></option>
+            <option value="1.16.5"></option>
+            <option value="1.12.2"></option>
+            <option value="1.7.10"></option>
+          </datalist>
+        </label>
+        <label>加载器
+          <select id="sel-loader">
+            <option value="fabric" selected>fabric</option>
+            <option value="forge">forge</option>
+            <option value="neoforge">neoforge</option>
+            <option value="quilt">quilt</option>
+          </select>
+        </label>
+        <label>找包数量
+          <select id="sel-limit">
+            <option value="5">5 个</option>
+            <option value="8" selected>8 个</option>
+            <option value="10">10 个</option>
+            <option value="15">15 个</option>
+            <option value="20">20 个</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+        <span id="custom-limit-wrap" class="hidden">
+          <input id="input-limit" type="number" min="1" max="20" placeholder="1-20" autocomplete="off">
+          <span class="cap">上限 20</span>
+        </span>
+        <span class="hint">预设后 agent 直接按此执行, 不再追问</span>
+      </div>
+      <div id="inputbar">
+        <textarea id="input" rows="1"
+          placeholder="描述你想要的整合包… (Enter 发送, Shift+Enter 换行)"></textarea>
+        <button id="btn-stop" class="hidden">⏸ 打断</button>
+        <button id="btn-send">发送</button>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

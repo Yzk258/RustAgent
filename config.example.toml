@@ -6,6 +6,7 @@ context_length = 32768
 price_input_per_m = 0.27
 price_output_per_m = 1.1
 token_budget = 2000000
+max_tool_iterations = 32                     # 一轮对话最多工具调用次数, 复杂组包需求可调大
 
 [output]
 download_dir = "./downloads"

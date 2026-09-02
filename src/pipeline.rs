@@ -193,6 +193,38 @@ pub fn is_valid_game_version(s: &str) -> bool {
 
 const VALID_LOADERS: [&str; 4] = ["fabric", "forge", "neoforge", "quilt"];
 
+pub fn is_valid_loader(s: &str) -> bool {
+    VALID_LOADERS.contains(&s)
+}
+
+/// 生成 "[界面预设: ...] " 前缀, CLI 的 /set 与 Web 预设栏共用同一注入逻辑。
+/// 无任何有效项时返回 None (原样透传消息)。找包数量单次对话上限 20。
+pub fn preset_prefix(
+    gv: Option<&str>,
+    loader: Option<&str>,
+    limit: Option<u32>,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(gv) = gv.map(str::trim).filter(|s| !s.is_empty()) {
+        if is_valid_game_version(gv) {
+            parts.push(format!("Minecraft 版本 {gv}"));
+        }
+    }
+    if let Some(ld) = loader.map(str::trim).filter(|s| !s.is_empty()) {
+        if is_valid_loader(ld) {
+            parts.push(format!("{ld} 加载器"));
+        }
+    }
+    if let Some(n) = limit.filter(|n| (1..=20).contains(n)) {
+        parts.push(format!("候选数量 {n}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("[界面预设: {}] ", parts.join(" / ")))
+    }
+}
+
 pub fn taste_tags(categories: &[String]) -> Vec<String> {
     categories
         .iter()
@@ -350,7 +382,16 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
         "mod_slugs": keep,
     })
     .to_string();
-    let result = registry.execute("build_modpack", &args).await?;
+    // demo 也走真实进展通道, 终端实时显示 "正在收集 mod x (i/n)"
+    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let printer = tokio::spawn(async move {
+        while let Some(msg) = prx.recv().await {
+            println!("  ⏳ {msg}");
+        }
+    });
+    let result = registry.execute("build_modpack", &args, Some(&ptx)).await?;
+    drop(ptx);
+    let _ = printer.await;
 
     if let Some(arr) = result.get("auto_added").and_then(|v| v.as_array()) {
         if arr.is_empty() {

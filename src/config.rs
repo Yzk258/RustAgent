@@ -7,6 +7,8 @@ pub struct Config {
     pub output: OutputConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 #[derive(Deserialize, Clone)]
@@ -22,10 +24,17 @@ pub struct LlmConfig {
     pub price_output_per_m: f64,
     #[serde(default)]
     pub token_budget: u64,
+    /// 一轮对话最多工具调用次数 (超过即中止), 复杂组包需求搜索多, 默认 16
+    #[serde(default = "default_max_tool_iterations")]
+    pub max_tool_iterations: u32,
 }
 
 fn default_context_length() -> u64 {
     32768
+}
+
+fn default_max_tool_iterations() -> u32 {
+    16
 }
 
 #[derive(Deserialize, Clone)]
@@ -36,6 +45,23 @@ pub struct OutputConfig {
 #[derive(Deserialize, Clone, Default)]
 pub struct DatabaseConfig {
     pub path: Option<String>,
+}
+
+/// Web UI 配置段: 目前只有端口, 后续 UI 相关选项 (主题/自动打开浏览器等) 在此扩展
+#[derive(Deserialize, Clone)]
+pub struct UiConfig {
+    #[serde(default = "default_ui_port")]
+    pub port: u16,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { port: default_ui_port() }
+    }
+}
+
+fn default_ui_port() -> u16 {
+    1780
 }
 
 impl Config {
