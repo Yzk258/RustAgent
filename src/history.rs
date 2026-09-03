@@ -24,10 +24,7 @@ pub struct SessionInfo {
     pub valid: bool,
 }
 
-pub fn save(agent: &Agent) -> Result<String> {
-    std::fs::create_dir_all(SESSION_DIR)?;
-    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let path = format!("{SESSION_DIR}/session-{ts}.json");
+fn write_to(agent: &Agent, path: &str) -> Result<()> {
     let session = Session {
         messages: agent.messages.clone(),
         prompt_tokens: agent.usage.prompt_tokens,
@@ -36,7 +33,45 @@ pub fn save(agent: &Agent) -> Result<String> {
         calls: agent.calls,
         saved_at: chrono::Local::now().to_rfc3339(),
     };
-    std::fs::write(&path, serde_json::to_string_pretty(&session)?)?;
+    std::fs::create_dir_all(SESSION_DIR)?;
+    let text = serde_json::to_string_pretty(&session)?;
+    let target = std::path::Path::new(path);
+    let temp = target.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temp, text)?;
+    if let Err(err) = std::fs::rename(&temp, target) {
+        if target.exists() {
+            std::fs::remove_file(target)?;
+            std::fs::rename(&temp, target)?;
+        } else {
+            return Err(err.into());
+        }
+    }
+    Ok(())
+}
+
+/// 手动另存: 每次生成一个带时间戳的新快照文件
+pub fn save(agent: &Agent) -> Result<String> {
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = format!("{SESSION_DIR}/session-{ts}.json");
+    write_to(agent, &path)?;
+    Ok(path)
+}
+
+/// 每轮对话结束后自动保存: 同一会话固定写同一个 auto-{ts}.json (ts = 首轮时间),
+/// 文件随对话推进持续覆盖更新; 尚无用户消息时跳过。返回空串表示无可保存内容。
+pub fn auto_save(agent: &mut Agent) -> Result<String> {
+    if !agent.messages.iter().any(|m| m.role == "user") {
+        return Ok(String::new());
+    }
+    if agent.session_file.is_none() {
+        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        agent.session_file = Some(format!("{SESSION_DIR}/auto-{ts}.json"));
+    }
+    let path = agent
+        .session_file
+        .clone()
+        .expect("session_file 已在上一步赋值");
+    write_to(agent, &path)?;
     Ok(path)
 }
 
@@ -62,6 +97,8 @@ pub fn load_path(agent: &mut Agent, path: &str) -> Result<String> {
     agent.usage.completion_tokens = session.completion_tokens;
     agent.usage.total_tokens = session.total_tokens;
     agent.calls = session.calls;
+    // 重置自动保存目标: 后续对话写入新的 auto-*.json, 不覆盖被加载的历史文件
+    agent.session_file = None;
     Ok(path.to_string())
 }
 
@@ -88,7 +125,11 @@ pub fn list() -> Vec<SessionInfo> {
                 modified: meta
                     .as_ref()
                     .and_then(|m| m.modified().ok())
-                    .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string())
+                    .map(|t| {
+                        chrono::DateTime::<chrono::Local>::from(t)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    })
                     .unwrap_or_default(),
                 valid,
             });

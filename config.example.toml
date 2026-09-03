@@ -12,4 +12,4 @@ max_tool_iterations = 32                     # 一轮对话最多工具调用次
 download_dir = "./downloads"
 
 [database]
-path = "./userdata.json"
+path = "./userdata.db"

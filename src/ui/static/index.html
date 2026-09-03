@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div id="app">
+  <div id="app" data-layout="workspace">
 
     <!-- 顶栏: 品牌名 / 当前模型 / 连接状态 -->
     <header id="topbar">
@@ -31,6 +31,7 @@
           <button id="btn-save">保存</button>
           <button id="btn-load">加载</button>
         </div>
+        <div class="kv dim" id="session-file">自动保存: 尚无对话</div>
         <ul class="pack-list" id="session-list"></ul>
       </section>
 
@@ -57,9 +58,9 @@
     </aside>
 
     <!-- 主聊天区 -->
-    <main id="chat">
-      <div id="messages"></div>
-      <div id="presetbar">
+    <main id="chat" aria-label="聊天工作区">
+      <div id="messages" role="log" aria-live="polite" aria-label="对话记录"></div>
+      <form id="presetbar" aria-label="整合包预设">
         <label>MC 版本
           <input id="sel-version" list="version-list" placeholder="如 1.21.1" autocomplete="off">
           <datalist id="version-list">
@@ -98,13 +99,13 @@
           <span class="cap">上限 20</span>
         </span>
         <span class="hint">预设后 agent 直接按此执行, 不再追问</span>
-      </div>
-      <div id="inputbar">
+      </form>
+      <form id="inputbar">
         <textarea id="input" rows="1"
           placeholder="描述你想要的整合包… (Enter 发送, Shift+Enter 换行)"></textarea>
         <button id="btn-stop" class="hidden">⏸ 打断</button>
         <button id="btn-send">发送</button>
-      </div>
+      </form>
     </main>
   </div>
 

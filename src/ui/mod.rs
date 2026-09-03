@@ -18,7 +18,6 @@ use std::sync::Arc;
 use crate::agent::{new_agent, Agent};
 use crate::config::Config;
 
-
 /// 共享应用状态: Agent 加互斥锁串行化对话, 配置只读。
 /// interrupt 是协作式打断标记 (打断按钮置位, agent 在安全点检查), 换 agent 时复用同一实例。
 /// 需要暴露给接口的新资源直接加字段即可。
@@ -37,10 +36,20 @@ const APP_JS: &str = include_str!("static/app.js");
 pub async fn serve(cfg: Config) -> Result<()> {
     let interrupt = Arc::new(AtomicBool::new(false));
     let agent = Arc::new(tokio::sync::Mutex::new(
-        new_agent(&cfg.llm, &cfg.output.download_dir, &cfg.db_path(), interrupt.clone()).await?,
+        new_agent(
+            &cfg.llm,
+            &cfg.output.download_dir,
+            &cfg.db_path(),
+            interrupt.clone(),
+        )
+        .await?,
     ));
     let port = cfg.ui.port;
-    let state = AppState { agent, cfg, interrupt };
+    let state = AppState {
+        agent,
+        cfg,
+        interrupt,
+    };
 
     let app = router(state);
 
@@ -59,17 +68,23 @@ pub async fn serve(cfg: Config) -> Result<()> {
 fn router(state: AppState) -> Router {
     Router::new()
         // 静态页面
-        .route("/", get(|| async {
-            (
-                [
-                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                    (header::CACHE_CONTROL, "no-cache"),
-                ],
-                INDEX_HTML,
-            )
-                .into_response()
-        }))
-        .route("/style.css", get(|| async { css_response(STYLE_CSS).await }))
+        .route(
+            "/",
+            get(|| async {
+                (
+                    [
+                        (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
+                    INDEX_HTML,
+                )
+                    .into_response()
+            }),
+        )
+        .route(
+            "/style.css",
+            get(|| async { css_response(STYLE_CSS).await }),
+        )
         .route("/app.js", get(|| async { js_response(APP_JS).await }))
         // REST API
         .route("/api/health", get(api::health))
@@ -107,7 +122,10 @@ async fn css_response(body: &'static str) -> Response {
 async fn js_response(body: &'static str) -> Response {
     (
         [
-            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
             (header::CACHE_CONTROL, "no-cache"),
         ],
         body,

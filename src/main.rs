@@ -35,14 +35,24 @@ async fn main() -> Result<()> {
     }
     if args.len() > 2 && args[1] == "repair" {
         let modrinth = modrinth::ModrinthClient::new()?;
-        let registry = ToolRegistry::new(modrinth, &cfg.output.download_dir, &cfg.db_path());
-        let result = registry.execute("repair_pack", &args[2..].join(" "), None).await?;
+        let registry = ToolRegistry::new(modrinth, &cfg.output.download_dir, cfg.db_path());
+        let result = registry
+            .execute("repair_pack", &args[2..].join(" "), &tools::TaskCtx::none())
+            .await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
 
     let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let agent = Arc::new(tokio::sync::Mutex::new(new_agent(&cfg.llm, &cfg.output.download_dir, &cfg.db_path(), interrupt).await?));
+    let agent = Arc::new(tokio::sync::Mutex::new(
+        new_agent(
+            &cfg.llm,
+            &cfg.output.download_dir,
+            &cfg.db_path(),
+            interrupt,
+        )
+        .await?,
+    ));
     let mut reader = BufReader::new(tokio::io::stdin());
 
     // 会话预设 (与 Web UI 预设栏同源): 每条消息注入 [界面预设: ...] 前缀
@@ -55,10 +65,20 @@ async fn main() -> Result<()> {
 
     loop {
         let mut parts: Vec<String> = Vec::new();
-        if let Some(gv) = &preset_gv { parts.push(gv.clone()); }
-        if let Some(ld) = &preset_loader { parts.push(ld.clone()); }
-        if let Some(n) = preset_limit { parts.push(format!("×{n}")); }
-        let tag = if parts.is_empty() { None } else { Some(parts.join("·")) };
+        if let Some(gv) = &preset_gv {
+            parts.push(gv.clone());
+        }
+        if let Some(ld) = &preset_loader {
+            parts.push(ld.clone());
+        }
+        if let Some(n) = preset_limit {
+            parts.push(format!("×{n}"));
+        }
+        let tag = if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("·"))
+        };
         cli::print_prompt(tag.as_deref());
         let mut line = String::new();
         let n = reader.read_line(&mut line).await?;
@@ -70,7 +90,13 @@ async fn main() -> Result<()> {
             "/quit" | "/exit" => break,
             "/new" => {
                 let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                *agent.lock().await = new_agent(&cfg.llm, &cfg.output.download_dir, &cfg.db_path(), interrupt).await?;
+                *agent.lock().await = new_agent(
+                    &cfg.llm,
+                    &cfg.output.download_dir,
+                    &cfg.db_path(),
+                    interrupt,
+                )
+                .await?;
                 println!("{}", paint(GREEN, "✓ 已开启新会话"));
             }
             "/save" => {
@@ -107,13 +133,16 @@ async fn main() -> Result<()> {
             }
             cmd if cmd.starts_with("/set") => {
                 let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
-                let apply = |gv: &mut Option<String>, ld: &mut Option<String>, n: &mut Option<u32>, args: &[&str]| {
+                let apply = |gv: &mut Option<String>,
+                             ld: &mut Option<String>,
+                             n: &mut Option<u32>,
+                             args: &[&str]| {
                     if args.is_empty() {
                         println!("{}", paint(DIM, "用法: /set 版本=1.21.1 加载器=fabric 数量=10 (键: 版本/加载器/数量)"));
                     }
                     for token in args {
                         let Some((key, val)) = token.split_once('=') else {
-                            eprintln!("{}", paint(RED, &format!("✗ 格式: /set 版本=1.21.1 加载器=fabric 数量=10 (键: 版本/加载器/数量)")));
+                            eprintln!("{}", paint(RED, "✗ 格式: /set 版本=1.21.1 加载器=fabric 数量=10 (键: 版本/加载器/数量)"));
                             continue;
                         };
                         match key {
@@ -121,7 +150,10 @@ async fn main() -> Result<()> {
                                 if pipeline::is_valid_game_version(val) {
                                     *gv = Some(val.to_string());
                                 } else {
-                                    eprintln!("{}", paint(RED, &format!("✗ 无效版本 '{val}', 应类似 1.21.1")));
+                                    eprintln!(
+                                        "{}",
+                                        paint(RED, &format!("✗ 无效版本 '{val}', 应类似 1.21.1"))
+                                    );
                                 }
                             }
                             "加载器" | "loader" | "l" => {
@@ -133,21 +165,40 @@ async fn main() -> Result<()> {
                             }
                             "数量" | "limit" | "n" => match val.parse::<u32>() {
                                 Ok(x) if (1..=20).contains(&x) => *n = Some(x),
-                                _ => eprintln!("{}", paint(RED, "✗ 数量需为 1-20 的整数 (单次对话上限 20)")),
+                                _ => eprintln!(
+                                    "{}",
+                                    paint(RED, "✗ 数量需为 1-20 的整数 (单次对话上限 20)")
+                                ),
                             },
-                            _ => eprintln!("{}", paint(RED, &format!("✗ 未知预设项 '{key}', 可选: 版本 / 加载器 / 数量"))),
+                            _ => eprintln!(
+                                "{}",
+                                paint(
+                                    RED,
+                                    &format!("✗ 未知预设项 '{key}', 可选: 版本 / 加载器 / 数量")
+                                )
+                            ),
                         }
                     }
                 };
                 apply(&mut preset_gv, &mut preset_loader, &mut preset_limit, &args);
                 let mut parts: Vec<String> = Vec::new();
-                if let Some(gv) = &preset_gv { parts.push(format!("版本={gv}")); }
-                if let Some(ld) = &preset_loader { parts.push(format!("加载器={ld}")); }
-                if let Some(n) = preset_limit { parts.push(format!("数量={n}")); }
+                if let Some(gv) = &preset_gv {
+                    parts.push(format!("版本={gv}"));
+                }
+                if let Some(ld) = &preset_loader {
+                    parts.push(format!("加载器={ld}"));
+                }
+                if let Some(n) = preset_limit {
+                    parts.push(format!("数量={n}"));
+                }
                 if parts.is_empty() {
                     println!("当前预设: 无 (消息将原样发送)");
                 } else {
-                    println!("{} {}", paint(GREEN, "✓ 当前预设:"), paint(ACCENT, &parts.join(" ")));
+                    println!(
+                        "{} {}",
+                        paint(GREEN, "✓ 当前预设:"),
+                        paint(ACCENT, &parts.join(" "))
+                    );
                 }
             }
             input => {
@@ -177,6 +228,17 @@ async fn main() -> Result<()> {
                     _ = tokio::signal::ctrl_c() => {
                         turn.abort();
                         println!("\n{}", paint(YELLOW, "⏸ 已打断当前任务"));
+                    }
+                }
+                // 每轮对话默认自动保存 (打断/出错也保留已有内容), 同一会话覆盖写同一文件
+                {
+                    let mut ag = agent.lock().await;
+                    match history::auto_save(&mut ag) {
+                        Ok(p) if !p.is_empty() => {
+                            println!("{}", paint(DIM, &format!("  ✓ 已自动保存 {p}")))
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("{}", paint(RED, &format!("✗ 自动保存失败: {e:#}"))),
                     }
                 }
             }
@@ -212,12 +274,12 @@ async fn selftest(cfg: &config::Config) -> Result<()> {
     }
 
     println!("[2/2] 组包测试 (sodium + fabric-api, 含依赖闭包)");
-    let registry = ToolRegistry::new(mr, &cfg.output.download_dir, &cfg.db_path());
+    let registry = ToolRegistry::new(mr, &cfg.output.download_dir, cfg.db_path());
     let val = registry
         .execute(
             "build_modpack",
             r#"{"name":"RustAgent-selftest","game_version":"1.21.1","loader":"fabric","mod_slugs":["sodium","fabric-api"]}"#,
-            None,
+            &tools::TaskCtx::none(),
         )
         .await?;
     println!("{}", serde_json::to_string_pretty(&val)?);

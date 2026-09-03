@@ -71,6 +71,37 @@ cargo fmt / cargo clippy        # 格式化 / 静态检查
 - 宽度计算换用 unicode-width crate（0.2.2，East Asian Width 权威实现，替代手写范围表，正确处理组合字符/CJK 扩展区）；同时把模糊宽度的 ⛏ 从横幅标题移到帮助行——模糊字符在不同终端渲染宽度不一致会破坏边框对齐。横幅四行等宽校验通过。
 - "打开目录"按钮已加入整合包卡片：POST /api/packs/open 在资源管理器中打开输出目录（不存在则先创建），实测弹出正常。
 - 打开目录 bug 修复：config 的 download_dir 是相对路径 (./downloads)，explorer 不解析相对路径导致打开的是默认位置。现 spawn 前用 std::path::absolute 转绝对路径（基准=进程工作目录，与包写入位置一致），返回消息也改为显示解析后的绝对路径便于核对。
+- 会话自动保存已实现（默认总是保存每一次对话，CLI 与 Web 同步）：Agent 新增 session_file 字段（当前自动保存目标，None=未保存过）；history.rs 新增 auto_save(agent)——首轮对话时生成 sessions/auto-{ts}.json，此后同一会话固定覆盖写同一文件（ts=首轮时间），无 user 消息时跳过；原 save 保留为手动另存快照（session-{ts}.json）。接入点两处：CLI main.rs 每轮 select! 收尾后自动保存并 dim 打印路径；Web api.rs chat 持锁块内 run_turn_with 之后 auto_save，done 事件新增 saved 字段（空串=未保存）。前端同步：会话卡片新增"自动保存: <路径>"行（数据来自 /api/info 新增的 session_file 字段，尚无对话显示"尚无对话"），handleEvent 的 done 分支收到 saved 非空即刷新会话列表（finally 里 refreshSidebar 本就会刷，双保险）。load_path 加载/导入后重置 session_file=None，继续对话 fork 出新文件不覆盖被导入的历史。冒烟验证：cargo build 无警告（clippy 4 条均为存量），ui 服务 health/info/sessions 200，info.session_file 字段生效。
+- 长任务"超 3 秒必有实时反馈 + 可打断"通用机制已落地（对照需求：如照片处理显示"已处理 45/120 张"、数学证明显示"正在尝试证明引理…"）：
+  - 进展结构化：tools.rs 的 ProgressTx 从 String 升级为 ProgressUpdate{text, current, total}（数值进度驱动两端进度条），新增 TaskCtx{progress, interrupt} 长任务上下文，execute 第三参数从 Option<&ProgressTx> 改为 &TaskCtx（repair 子命令/selftest 传 TaskCtx::none()）；约定超 3s 的工具必须接 ctx 并 report 进展、循环间隙 check_interrupt。
+  - 3s 静默兜底（agent.rs）：每次工具执行 spawn watchdog（500ms tick），运行超 3s 且距上次进展超 3s 即发"xx 仍在执行… (Ns)"，真实进展刷新 last_activity 原子不干扰，工具结束 abort。任何工具（含未来新增、忘接进展的）都被兜底覆盖。
+  - 工具内打断：build_modpack / repair_pack / dependency_closure 的每个 mod 收集循环开头 check_interrupt()，打断请求秒级生效（此前只能在工具间隙响应，组包 100 mod 要等全部跑完）；错误串含 TOOL_INTERRUPTED 标记，agent 识别后推占位 tool 消息直接 abort_turn 收尾，不再回传 LLM 浪费 token。
+  - CLI 进度条：cli.rs 新增 ProgressPrinter（零依赖 ANSI，▰▱ 条 + 单行原地刷新 \r\x1b[2K，工具行/回复打印前先清进展行防错位）；不用 indicatif 的原因——REPL Ctrl+C 直接 abort 打印任务，自绘行只是停在原地，三方库全局 draw target 会残留持续抢占 stdout。demo 流水线同步适配新通道。
+  - Web：progress 事件带 current/total（None→null），app.js progressPrefix 渲染 ▰▱ 条；NDJSON 流式与 SSE 同类（单向实时推送），前端 fetch 解析已稳定，不换协议。
+  - 验证：cargo build 通过、clippy 4 条均为存量；cargo run -- selftest 走真实 Modrinth API 组包通过（新签名无回归）；ui 服务 health 200 + app.js 含进度条渲染代码。
+- 卡死 bug 修复（上线即踩坑）：进展通道死锁——agent.rs 里 ptx clone 进 TaskCtx 后又单独 drop(ptx)，ctx 还持有发送端导致通道永不关闭，工具执行结束 `forwarder.await` 死等，整轮对话卡在"思考中"（CLI/Web 均卡）。修复：ptx 直接 move 进 ctx（不留多余 clone），工具结束后 drop(ctx) 作为唯一发送端关闭通道。实测"搜索 sodium"走完 2 次 LLM 调用 + 工具结果回传 + 回复 + 自动保存，不再卡死。教训：mpsc 通道关闭语义看"全部发送端"，包装进上下文结构后必须审视谁还握着 clone。
+- LLM 空窗期实时反馈补齐（用户反馈"思考中不显示进度"的真正痛点：进展事件只覆盖工具执行那几秒，而一轮对话的大头是 LLM 调用 10~30s，期间只有静态"思考中"）：agent.rs 每次 LLM 调用 spawn LLM watchdog（500ms tick，超 3s 周期发"模型思考中… (Ns)"进展事件），select! 的成功/失败/打断三条退出路径都 abort 防泄漏；前端 showThinking 内置 setInterval 每秒更新"思考中 (Ns)"（hideThinking 清计时器），3s 后 agent 侧进展行接管。CLI 端 ProgressPrinter 自动单行刷新。实测组包全流程日志：模型思考中 (3s→5s) → 解析依赖闭包 → ▰▰▰▱ 1/2 正在收集 mod sodium → 2/2 fabric-api → 写入 → 回复，CLI/Web 两端全程有秒级反馈。
+- LLM 改流式输出（治本"模型思考中… (73s)"）：此前非流式 = 整个响应生成完才返回，长回复期间只能看秒数跳。llm.rs 新增 chat_stream：SSE 逐行解析（bytes_stream + 手动按 \n 分帧，data: [DONE] 结束），delta.content 增量经 on_delta 回调即时转成 AgentEvent::ReplyDelta（打字机效果，首个 token 1~3s 可见），tool_calls 分片按 index 拼装（id/name upsert + arguments 追加），usage 经 stream_options.include_usage 获取（缺失则 default），响应非 text/event-stream 时回退一次性 JSON 解析；服务端不支持流式也不炸。reqwest 加 "stream" feature，流解析用 tokio_stream::StreamExt（不加 futures-util）。事件链路：ReplyDelta → CLI printer.delta() 逐片段 write（首个片段前空行，Reply 到达只换行收尾）；Web reply_delta 事件追加纯文本到气泡、完整 reply 到达后 renderText 重渲染（markdown 生效）。修了一个前端致命坑：send() 里 thinking 变量重复 const 声明（会让整个 app.js SyntaxError），合并为单声明。chat() 非流式方法已无人用，删除。实测组包全流程（3 次 LLM 流式调用 + 工具 + 组包 + 保存）无卡死，node --check 通过，ui 冒烟 200。
+
+## 2026-09-03：可靠性优化
+
+- 完成配置启动校验：检查 URL 协议、上下文长度、token 单价、工具调用轮数和下载目录，避免运行很久后才暴露配置错误。
+- 完成会话与用户数据库的临时文件写入：保存内容先落到 `*.tmp-进程号`，再替换正式 JSON；目录创建失败现在会返回错误，不再被忽略。
+- 修复工具错误 JSON 的构造方式：改用 `serde_json::json!`，避免错误文本中的引号或换行破坏 JSON。
+- 收紧 Minecraft 版本格式校验，拒绝空段版本号，例如 `1..21`。
+- 新增 4 个自动测试，覆盖 LLM tool call 分片合并、预设过滤、版本/加载器校验、用户口味权重排序。
+- 验证结果：`cargo test` 为 4 passed；`cargo clippy --all-targets -- -D warnings` 通过；已执行 `cargo fmt`。
+
+本次没有处理 API Key 暴露问题，按本轮需求保留为单独事项。
+
+## 2026-09-03：前端结构优化
+
+- `src/ui/static/app.js` 增加 `DOM` 节点缓存和集中式 `state`，减少散落的 `getElementById` 与全局变量依赖。
+- API 请求统一由 `API.request` 处理响应文本、JSON 解析和 HTTP 错误；侧栏四个数据面板用 `Promise.allSettled` 并行刷新，互不阻塞。
+- 聊天输入改为表单提交，同时保留 Enter 发送和 Shift+Enter 换行；预设区域阻止误提交。
+- `index.html` 增加 `role=log`、`aria-live` 和表单语义，聊天内容对辅助工具更友好。
+- `style.css` 增加预设换行、移动端间距、气泡宽度和滚动槽规则，改善手机窄屏布局。
+- 验证：`node --check src/ui/static/app.js` 通过；`cargo test` 4 个测试全部通过；`git diff --check` 无错误。
 
 ## 待办 / TODO
 
@@ -80,7 +111,35 @@ cargo fmt / cargo clippy        # 格式化 / 静态检查
 - [ ] token 显示与预算上限自动中断机制
 - [ ] 冲突检测基于元数据的更细粒度报告
 - [ ] 用户口味数据库的反馈闭环完善
+
+## 2026-09-03：用户数据库升级为 SQLite
+
+- 原来是一个 JSON 文件里的两个数组，数据增长后每次保存都要整体读写，反馈标签和整合包模组也没有独立关系。
+- 现在拆成 `feedback`、`feedback_tags`、`packs`、`pack_mods` 四张 SQLite 表，并增加外键、级联删除和常用索引。
+- 保存使用事务，反馈、标签、整合包和模组关系不会只写入一部分。
+- 继续兼容 `database.path = "./userdata.json"`：实际使用同目录 `userdata.db`；第一次启动自动导入旧 JSON，旧文件不删除。
+- 上层推荐、反馈和 Web 接口继续调用 `UserDatabase`，本次没有改变用户操作方式。
+- 验证：SQLite 关系往返测试通过，`cargo test` 4 个通过，严格 Clippy 通过。
+
+## 2026-09-03：移除开发期旧数据库兼容层
+
+- 项目仍在开发阶段，不再支持从 `userdata.json` 自动迁移；配置默认数据库改为 `userdata.db`。
+- 删除了 `.json -> .db` 路径转换、旧 JSON 反序列化结构和保存时多余的 path 参数。
+- `modrinth-test/` 暂时保留：它是独立的真实 Modrinth API/整合包验证程序，不属于旧数据库兼容接口。
+
+## 2026-09-03：tools.rs 报红修复
+
+- `build_modpack` 和 `repair_pack` 原先在版本返回空 `files` 时使用 `v.files[0]`，存在越界崩溃风险。
+- 改为显式处理空文件列表：记录冲突并继续其他 mod；正常版本仍优先使用 primary 文件。
+- 删除 `VersionFile` 无用导入，解决严格检查下的报红。
+- 验证：`cargo test` 4 个通过，`cargo clippy --all-targets -- -D warnings` 通过，`git diff --check` 通过。
 - [ ] 组完包后自动化拖入pcl2启动器纠错的可选机制补充
 - [ ] 组包mod数量可选择化（1-10、10-20...）、mod条件可选择化（从最新或是最热两种模式找mod）→ 找包数量已可选(5-20+自定义, 单次上限20, 单包上限100), mod来源排序(最新/最热)待做
 - [X] Web UI 增强：聊天中途打断按钮、整合包点击下载/打开目录、会话历史列表展示
 - [X] Web UI 实时进展显示（组包阶段"正在收集 mod x (i/n)"已可见，其他工具可按需接入 ProgressTx）
+
+## 2026-09-03：修正 PackRecord 序列化报红
+
+- `/api/profile` 会把 `UserDatabase.packs` 返回给前端，因此 `PackRecord` 必须实现 `serde::Serialize`；当前定义已补齐该派生。
+- 增加数据库测试断言，确保整合包记录可以转换为 JSON，避免 Rust Analyzer 或编译检查再次出现同类问题。
+- 更正前一条 SQLite 记录：开发阶段已移除旧 `userdata.json` 迁移和兼容逻辑，当前只使用配置指定的 SQLite 数据库路径。

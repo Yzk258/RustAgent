@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{bail, Context};
 use serde::Deserialize;
 
 #[derive(Deserialize, Clone)]
@@ -56,7 +56,9 @@ pub struct UiConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { port: default_ui_port() }
+        Self {
+            port: default_ui_port(),
+        }
     }
 }
 
@@ -69,13 +71,36 @@ impl Config {
         self.database
             .path
             .clone()
-            .unwrap_or_else(|| "userdata.json".to_string())
+            .unwrap_or_else(|| "userdata.db".to_string())
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let url = reqwest::Url::parse(&self.llm.base_url)
+            .with_context(|| format!("LLM base_url 不是有效 URL: {}", self.llm.base_url))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            bail!("LLM base_url 只支持 http 或 https");
+        }
+        if self.llm.context_length < 256 {
+            bail!("context_length 不能小于 256");
+        }
+        if self.llm.price_input_per_m < 0.0 || self.llm.price_output_per_m < 0.0 {
+            bail!("token 单价不能为负数");
+        }
+        if self.llm.max_tool_iterations == 0 {
+            bail!("max_tool_iterations 必须大于 0");
+        }
+        if self.output.download_dir.trim().is_empty() {
+            bail!("output.download_dir 不能为空");
+        }
+        Ok(())
     }
 }
 
 pub fn load(path: &str) -> anyhow::Result<Config> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("找不到 {path}, 请复制 config.example.toml 为 config.toml 并填写 api_key"))?;
+    let text = std::fs::read_to_string(path).with_context(|| {
+        format!("找不到 {path}, 请复制 config.example.toml 为 config.toml 并填写 api_key")
+    })?;
     let cfg: Config = toml::from_str(&text).context("config.toml 格式错误")?;
+    cfg.validate().context("配置校验失败")?;
     Ok(cfg)
 }

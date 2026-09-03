@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::config::LlmConfig;
@@ -16,9 +16,16 @@ pub enum AgentEvent {
     ToolCall { name: String, args: String },
     /// 某个工具执行完毕 (ok 表示是否成功)
     ToolResult { name: String, ok: bool },
-    /// 工具内部的阶段性进展 (如 "正在收集 mod sodium (2/8)"), 原地更新展示
-    Progress { text: String },
-    /// 最终自然语言回复
+    /// 工具内部的阶段性进展 (如 "正在收集 mod sodium (2/8)"), 原地更新展示;
+    /// current/total 存在时前端可渲染进度条
+    Progress {
+        text: String,
+        current: Option<u64>,
+        total: Option<u64>,
+    },
+    /// 最终回复的增量片段 (流式输出, 打字机效果)
+    ReplyDelta { text: String },
+    /// 最终自然语言回复 (完整文本, 紧跟在 ReplyDelta 序列之后)
     Reply { text: String },
 }
 
@@ -43,6 +50,8 @@ pub struct Agent {
     pub messages: Vec<Message>,
     pub usage: Usage,
     pub calls: u64,
+    /// 当前自动保存文件路径 (None = 本会话尚未保存过); 加载/导入历史后重置为 None
+    pub session_file: Option<String>,
 }
 
 /// 组装一个全新的 Agent (CLI 与 Web UI 共用的构造入口)。
@@ -60,7 +69,12 @@ pub async fn new_agent(
 }
 
 impl Agent {
-    pub fn new(llm: LlmClient, tools: ToolRegistry, llm_cfg: LlmConfig, interrupt: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        llm: LlmClient,
+        tools: ToolRegistry,
+        llm_cfg: LlmConfig,
+        interrupt: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             llm,
             tools,
@@ -69,6 +83,7 @@ impl Agent {
             messages: vec![Message::system(SYSTEM_PROMPT)],
             usage: Usage::default(),
             calls: 0,
+            session_file: None,
         }
     }
 
@@ -82,26 +97,41 @@ impl Agent {
         // 创建事件通道, 并启动一个打印任务消费事件
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let printer = tokio::spawn(async move {
-            use crate::cli::{paint, ACCENT, DIM, GREEN, RED, YELLOW};
+            use crate::cli::{paint, ACCENT, DIM, GREEN, RED};
+            let mut pp = crate::cli::ProgressPrinter::new();
+            let mut streaming = false; // 本轮回复是否已在逐字输出
             while let Some(ev) = rx.recv().await {
                 match ev {
                     AgentEvent::ToolCall { name, args } => {
-                        println!(
+                        streaming = false;
+                        pp.line(&format!(
                             "  {} {}({})",
                             paint(DIM, "⚙"),
                             paint(ACCENT, &name),
                             truncate(&args, 70)
-                        );
+                        ));
                     }
                     AgentEvent::ToolResult { name, ok } => {
                         if ok {
-                            println!("  {} {}", paint(GREEN, "✓"), paint(DIM, &name));
+                            pp.line(&format!("  {} {}", paint(GREEN, "✓"), paint(DIM, &name)));
                         } else {
-                            println!("  {} {}", paint(RED, "✗"), name);
+                            pp.line(&format!("  {} {}", paint(RED, "✗"), name));
                         }
                     }
-                    AgentEvent::Progress { text } => println!("  {} {text}", paint(YELLOW, "⏳")),
-                    AgentEvent::Reply { text } => println!("\n{text}\n"),
+                    AgentEvent::Progress {
+                        text,
+                        current,
+                        total,
+                    } => {
+                        pp.progress(&text, current, total);
+                    }
+                    AgentEvent::ReplyDelta { text } => {
+                        pp.delta(&text, &mut streaming);
+                    }
+                    AgentEvent::Reply { text } => {
+                        pp.reply_end(&text, streaming);
+                        streaming = false;
+                    }
                 }
             }
         });
@@ -127,13 +157,47 @@ impl Agent {
             self.check_budget()?;
             self.trim_context();
 
-            // LLM 调用可被即时打断 (200ms 轮询标记, reqwest 请求随 future 取消而中止)
-            let result = tokio::select! {
-                r = self.llm.chat(self.messages.clone(), Some(crate::tools::ToolRegistry::defs())) => r?,
+            // LLM 调用 watchdog: 超过 3s 时周期发 "模型思考中… (Ns)" 进展事件,
+            // 让 CLI/Web 在 LLM 空窗期也有实时反馈 (LLM 调用通常占一轮的大头)
+            let llm_wd_tx = tx.clone();
+            let llm_watchdog = tokio::spawn(async move {
+                let start = std::time::Instant::now();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if start.elapsed().as_millis() > 3000 {
+                        let _ = llm_wd_tx.send(AgentEvent::Progress {
+                            text: format!("模型思考中… ({}s)", start.elapsed().as_secs()),
+                            current: None,
+                            total: None,
+                        });
+                    }
+                }
+            });
+            // LLM 流式调用: 文本增量即时转成 ReplyDelta 事件 (打字机效果),
+            // 超过 3s 无响应时 watchdog 周期发 "模型思考中… (Ns)" (工具调用分片
+            // 阶段没有文本增量, 依然需要 watchdog 兜底)
+            let delta_tx = tx.clone();
+            let stream_result = tokio::select! {
+                r = self.llm.chat_stream(
+                    self.messages.clone(),
+                    Some(crate::tools::ToolRegistry::defs()),
+                    |d| {
+                        let _ = delta_tx.send(AgentEvent::ReplyDelta { text: d.to_string() });
+                    },
+                ) => r,
                 _ = wait_interrupt(&self.interrupt) => {
+                    llm_watchdog.abort();
                     return self.abort_turn(tx, 0).await;
                 }
             };
+            let result = match stream_result {
+                Ok(v) => v,
+                Err(e) => {
+                    llm_watchdog.abort();
+                    return Err(e);
+                }
+            };
+            llm_watchdog.abort();
             self.accumulate(&result.usage);
             let msg = result.message;
 
@@ -151,27 +215,83 @@ impl Agent {
                             name: name.clone(),
                             args: call.function.arguments.clone(),
                         });
-                        // 进展通道: 工具内部发 String, 这里转成 Progress 事件转发给前端
-                        let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<String>();
-                        let fwd = tx.clone();
+                        // 长任务上下文: 工具内部上报进展 + 在循环间隙响应打断
+                        // 注意: ptx 直接 move 进 ctx, 全局唯一的进展通道发送端随 ctx
+                        // drop 而关闭; 若再留一个 clone, 通道永远不关, forwarder.await
+                        // 会死等导致整轮对话卡死 (已踩坑)
+                        let (ptx, mut prx) =
+                            tokio::sync::mpsc::unbounded_channel::<crate::tools::ProgressUpdate>();
+                        let last_activity = Arc::new(AtomicI64::new(now_ms()));
+                        let ctx = crate::tools::TaskCtx {
+                            progress: Some(ptx),
+                            interrupt: Some(self.interrupt.clone()),
+                        };
+                        let fwd_tx = tx.clone();
+                        let fwd_last = last_activity.clone();
                         let forwarder = tokio::spawn(async move {
-                            while let Some(text) = prx.recv().await {
-                                let _ = fwd.send(AgentEvent::Progress { text });
+                            while let Some(u) = prx.recv().await {
+                                fwd_last.store(now_ms(), Ordering::Relaxed);
+                                let _ = fwd_tx.send(AgentEvent::Progress {
+                                    text: u.text,
+                                    current: u.current,
+                                    total: u.total,
+                                });
                             }
                         });
-                        let (result, ok) = match self
+                        // 3s 静默兜底: 工具超过 3s 未上报任何进展时周期性提示仍在执行,
+                        // 保证 "超过 3 秒的任务必有实时反馈" (真实进展会刷新 last_activity)
+                        let wd_tx = tx.clone();
+                        let wd_last = last_activity.clone();
+                        let wd_name = name.clone();
+                        let watchdog = tokio::spawn(async move {
+                            let start = std::time::Instant::now();
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                let now = now_ms();
+                                if start.elapsed().as_millis() > 3000
+                                    && now - wd_last.load(Ordering::Relaxed) > 3000
+                                {
+                                    wd_last.store(now, Ordering::Relaxed);
+                                    let _ = wd_tx.send(AgentEvent::Progress {
+                                        text: format!(
+                                            "{wd_name} 仍在执行… ({}s)",
+                                            start.elapsed().as_secs()
+                                        ),
+                                        current: None,
+                                        total: None,
+                                    });
+                                }
+                            }
+                        });
+                        let (result, ok, tool_interrupted) = match self
                             .tools
-                            .execute(name, &call.function.arguments, Some(&ptx))
+                            .execute(name, &call.function.arguments, &ctx)
                             .await
                         {
-                            Ok(v) => (v.to_string(), true),
-                            Err(e) => (format!("{{ \"error\": \"{}\" }}", format!("{e:#}").replace('"', "'")), false),
+                            Ok(v) => (v.to_string(), true, false),
+                            Err(e) => {
+                                let s = format!("{e:#}");
+                                let interrupted = s.contains(crate::tools::TOOL_INTERRUPTED);
+                                (
+                                    serde_json::json!({ "error": s }).to_string(),
+                                    false,
+                                    interrupted,
+                                )
+                            }
                         };
-                        drop(ptx); // 关闭进展通道, 等转发任务排空
+                        drop(ctx); // 关闭进展通道的唯一发送端, 等转发任务排空
                         let _ = forwarder.await;
+                        watchdog.abort();
                         // 发出工具结果事件
-                        let _ = tx.send(AgentEvent::ToolResult { name: name.clone(), ok });
+                        let _ = tx.send(AgentEvent::ToolResult {
+                            name: name.clone(),
+                            ok,
+                        });
                         self.messages.push(Message::tool(&call.id, result));
+                        // 工具内部被打断: 不再回传 LLM 浪费 token, 直接收尾
+                        if tool_interrupted {
+                            return self.abort_turn(tx, i + 1).await;
+                        }
                     }
                 }
                 _ => {
@@ -197,18 +317,17 @@ impl Agent {
     ) -> Result<()> {
         if executed > 0 {
             // 最后一条 assistant 消息带 tool_calls, 为未执行的调用补占位
-            if let Some(calls) = self
-                .messages
-                .last()
-                .and_then(|m| m.tool_calls.clone())
-            {
+            if let Some(calls) = self.messages.last().and_then(|m| m.tool_calls.clone()) {
                 for call in calls.iter().skip(executed) {
-                    self.messages.push(Message::tool(&call.id, "（用户已打断）".into()));
+                    self.messages
+                        .push(Message::tool(&call.id, "（用户已打断）".into()));
                 }
             }
         }
         self.messages.push(Message::assistant("（已打断当前任务）"));
-        let _ = tx.send(AgentEvent::Reply { text: "⏸ 已打断当前任务".into() });
+        let _ = tx.send(AgentEvent::Reply {
+            text: "⏸ 已打断当前任务".into(),
+        });
         Ok(())
     }
 
@@ -237,11 +356,7 @@ impl Agent {
                     m.content.as_deref().map(str::len).unwrap_or(0)
                         + m.tool_calls
                             .as_ref()
-                            .map(|t| {
-                                t.iter()
-                                    .map(|c| c.function.arguments.len())
-                                    .sum::<usize>()
-                            })
+                            .map(|t| t.iter().map(|c| c.function.arguments.len()).sum::<usize>())
                             .unwrap_or(0)
                         + 24
                 })
@@ -275,7 +390,11 @@ impl Agent {
             self.usage.completion_tokens,
             self.usage.total_tokens,
             self.cost(),
-            if self.llm_cfg.token_budget == 0 { "不限".to_string() } else { self.llm_cfg.token_budget.to_string() }
+            if self.llm_cfg.token_budget == 0 {
+                "不限".to_string()
+            } else {
+                self.llm_cfg.token_budget.to_string()
+            }
         )
     }
 }
@@ -288,6 +407,15 @@ async fn wait_interrupt(flag: &Arc<AtomicBool>) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+}
+
+/// 当前毫秒时间戳 (watchdog 静默检测用)
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn truncate(s: &str, max: usize) -> &str {

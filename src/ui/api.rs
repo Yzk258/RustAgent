@@ -41,6 +41,7 @@ pub async fn info(State(state): SharedState) -> Json<Value> {
         "calls": ag.calls,
         "total_tokens": ag.usage.total_tokens,
         "cost": format!("{:.4}", ag.cost()),
+        "session_file": ag.session_file,
     }))
 }
 
@@ -88,7 +89,11 @@ pub async fn packs(State(state): SharedState) -> Json<Value> {
                 let modified = meta
                     .as_ref()
                     .and_then(|m| m.modified().ok())
-                    .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string())
+                    .map(|t| {
+                        chrono::DateTime::<chrono::Local>::from(t)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    })
                     .unwrap_or_default();
                 packs.push(json!({
                     "name": path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default(),
@@ -205,7 +210,16 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
                     AgentEvent::ToolResult { name, ok } => {
                         json!({ "type": "tool_result", "name": name, "ok": ok })
                     }
-                    AgentEvent::Progress { text } => json!({ "type": "progress", "text": text }),
+                    AgentEvent::Progress {
+                        text,
+                        current,
+                        total,
+                    } => {
+                        json!({ "type": "progress", "text": text, "current": current, "total": total })
+                    }
+                    AgentEvent::ReplyDelta { text } => {
+                        json!({ "type": "reply_delta", "text": text })
+                    }
                     AgentEvent::Reply { text } => json!({ "type": "reply", "text": text }),
                 };
                 let _ = fwd_tx.send(Ok(Bytes::from(format!("{line}\n"))));
@@ -214,6 +228,7 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
 
         // 串行执行一轮对话: 持锁期间同一时刻只服务一个请求
         let mut err_msg: Option<String> = None;
+        let saved_path;
         let summary;
         {
             let mut ag = agent.lock().await;
@@ -222,6 +237,8 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
             if let Err(e) = res {
                 err_msg = Some(format!("{e:#}"));
             }
+            // 每轮对话默认自动保存 (打断/出错也保留已有内容), 同一会话覆盖写同一文件
+            saved_path = history::auto_save(&mut ag).unwrap_or_default();
         }
         // 关闭事件通道, 等转发任务把剩余事件写完
         drop(ev_tx);
@@ -231,7 +248,7 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
         if let Some(m) = err_msg {
             send_line(json!({ "type": "error", "message": m }));
         }
-        send_line(json!({ "type": "done", "usage": summary }));
+        send_line(json!({ "type": "done", "usage": summary, "saved": saved_path }));
     });
 
     // 把通道包装成字节流返回, 客户端边收边渲染
@@ -268,7 +285,9 @@ pub async fn session_new(State(state): SharedState) -> Json<Value> {
 /// 打断当前对话轮: 置位协作式取消标记, agent 在下一个安全点收尾
 /// (LLM 调用即时中止; 工具间隙逐个停, 不需 agent 互斥锁)
 pub async fn chat_interrupt(State(state): SharedState) -> Json<Value> {
-    state.interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .interrupt
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     Json(json!({ "ok": true, "message": "已发送打断请求, 任务将在安全点停止" }))
 }
 
@@ -316,7 +335,10 @@ pub struct ImportRequest {
 }
 
 /// 导入指定会话文件: 校验合法性后灌入 agent, 并返回可渲染消息
-pub async fn session_import(State(state): SharedState, Json(req): Json<ImportRequest>) -> Json<Value> {
+pub async fn session_import(
+    State(state): SharedState,
+    Json(req): Json<ImportRequest>,
+) -> Json<Value> {
     if req.name.contains('/') || req.name.contains('\\') || req.name.contains("..") {
         return Json(json!({ "ok": false, "message": "非法文件名" }));
     }

@@ -4,17 +4,66 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read as _, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::llm::ToolDef;
-use crate::modrinth::{ModrinthClient, VersionFile};
+use crate::modrinth::ModrinthClient;
 
-/// 工具执行过程中的阶段性进展上报通道 (如 "正在收集 mod x (2/8)")。
-/// 传 None 表示调用方不关心进展 (如 repair 子命令)。
-pub type ProgressTx = tokio::sync::mpsc::UnboundedSender<String>;
+/// 工具执行过程中的阶段性进展更新: 文本必有, 数值进度可选 (驱动 CLI 进度条 / Web 进度条)。
+#[derive(Clone)]
+pub struct ProgressUpdate {
+    pub text: String,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
+}
 
-fn report(progress: Option<&ProgressTx>, msg: String) {
-    if let Some(tx) = progress {
-        let _ = tx.send(msg);
+pub type ProgressTx = tokio::sync::mpsc::UnboundedSender<ProgressUpdate>;
+
+/// 协作式打断标记 (与 Agent 的 interrupt 同一实例)
+pub type InterruptFlag = Arc<AtomicBool>;
+
+/// 工具被打断时抛出的错误标记, agent 据此跳过后续 LLM 调用直接收尾
+pub const TOOL_INTERRUPTED: &str = "用户已打断";
+
+/// 长任务上下文: 进展上报 + 打断标记。约定执行超过 3s 的工具必须:
+/// 1. 通过 report 上报阶段性进展 (UI/CLI 实时渲染);
+/// 2. 在循环等可等待间隙调用 check_interrupt (让打断请求秒级生效)。
+pub struct TaskCtx {
+    pub progress: Option<ProgressTx>,
+    pub interrupt: Option<InterruptFlag>,
+}
+
+impl TaskCtx {
+    pub fn none() -> Self {
+        Self {
+            progress: None,
+            interrupt: None,
+        }
+    }
+
+    pub fn report(&self, text: impl Into<String>, current: Option<u64>, total: Option<u64>) {
+        if let Some(tx) = &self.progress {
+            let _ = tx.send(ProgressUpdate {
+                text: text.into(),
+                current,
+                total,
+            });
+        }
+    }
+
+    pub fn interrupted(&self) -> bool {
+        self.interrupt
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    }
+
+    /// 打断检查点: 已请求打断则立即中止工具 (错误串带 TOOL_INTERRUPTED 标记)
+    pub fn check_interrupt(&self) -> Result<()> {
+        if self.interrupted() {
+            bail!("{TOOL_INTERRUPTED}");
+        }
+        Ok(())
     }
 }
 
@@ -88,7 +137,11 @@ impl ToolRegistry {
         download_dir: impl Into<PathBuf>,
         db_path: impl Into<String>,
     ) -> Self {
-        Self { modrinth, download_dir: download_dir.into(), db_path: db_path.into() }
+        Self {
+            modrinth,
+            download_dir: download_dir.into(),
+            db_path: db_path.into(),
+        }
     }
 
     pub fn defs() -> Vec<ToolDef> {
@@ -170,15 +223,15 @@ impl ToolRegistry {
         &self,
         name: &str,
         arguments: &str,
-        progress: Option<&ProgressTx>,
+        ctx: &TaskCtx,
     ) -> Result<serde_json::Value> {
         match name {
             "search_mods" => self.search_mods(arguments).await,
-            "build_modpack" => self.build_modpack(arguments, progress).await,
+            "build_modpack" => self.build_modpack(arguments, ctx).await,
             "record_feedback" => self.record_feedback(arguments).await,
             "get_user_profile" => self.get_user_profile().await,
             "recommend_new_mods" => self.recommend_new(arguments).await,
-            "repair_pack" => self.repair_pack(arguments, progress).await,
+            "repair_pack" => self.repair_pack(arguments, ctx).await,
             _ => bail!("未知工具: {name}"),
         }
     }
@@ -219,7 +272,11 @@ impl ToolRegistry {
             .modrinth
             .search(
                 &query,
-                if facets.is_empty() { None } else { Some(facets) },
+                if facets.is_empty() {
+                    None
+                } else {
+                    Some(facets)
+                },
                 a.limit.unwrap_or(8).clamp(1, 20),
                 "relevance",
             )
@@ -228,8 +285,7 @@ impl ToolRegistry {
             .hits
             .iter()
             .map(|h| {
-                let recent: Vec<String> =
-                    h.versions.iter().rev().take(4).cloned().collect();
+                let recent: Vec<String> = h.versions.iter().rev().take(4).cloned().collect();
                 json!({
                     "slug": h.slug,
                     "title": h.title,
@@ -244,11 +300,7 @@ impl ToolRegistry {
         Ok(json!({ "query_used": query, "total_hits": resp.total_hits, "mods": mods }))
     }
 
-    async fn build_modpack(
-        &self,
-        args: &str,
-        progress: Option<&ProgressTx>,
-    ) -> Result<serde_json::Value> {
+    async fn build_modpack(&self, args: &str, ctx: &TaskCtx) -> Result<serde_json::Value> {
         let a: BuildArgs = serde_json::from_str(args)?;
         if a.mod_slugs.is_empty() {
             bail!("mod 列表为空");
@@ -270,21 +322,27 @@ impl ToolRegistry {
         let mut conflicts: Vec<serde_json::Value> = Vec::new();
         let mut total_size: u64 = 0;
 
-        report(progress, format!("解析依赖闭包 ({} 个 mod)", a.mod_slugs.len()));
+        ctx.report(
+            format!("解析依赖闭包 ({} 个 mod)", a.mod_slugs.len()),
+            None,
+            None,
+        );
         let (final_slugs, auto_added, closure_conflicts) = crate::pipeline::dependency_closure(
             &self.modrinth,
             &a.game_version,
             &a.loader,
             &a.mod_slugs,
+            ctx,
         )
         .await?;
-        report(
-            progress,
+        ctx.report(
             format!(
                 "依赖闭包解析完成: 共 {} 个 mod (自动补充前置 {} 个)",
                 final_slugs.len(),
                 auto_added.len()
             ),
+            None,
+            None,
         );
         for c in &closure_conflicts {
             conflicts.push(json!({ "issue": c }));
@@ -292,7 +350,12 @@ impl ToolRegistry {
 
         let total = final_slugs.len();
         for (i, slug) in final_slugs.iter().enumerate() {
-            report(progress, format!("正在收集 mod {slug} ({}/{})", i + 1, total));
+            ctx.check_interrupt()?;
+            ctx.report(
+                format!("正在收集 mod {slug} ({}/{})", i + 1, total),
+                Some((i + 1) as u64),
+                Some(total as u64),
+            );
             if !seen.insert(slug.clone()) {
                 conflicts.push(json!({ "slug": slug, "issue": "重复添加" }));
                 continue;
@@ -304,7 +367,8 @@ impl ToolRegistry {
             {
                 Ok(v) => v,
                 Err(e) => {
-                    conflicts.push(json!({ "slug": slug, "issue": format!("无法获取版本信息: {e:#}") }));
+                    conflicts
+                        .push(json!({ "slug": slug, "issue": format!("无法获取版本信息: {e:#}") }));
                     continue;
                 }
             };
@@ -315,11 +379,15 @@ impl ToolRegistry {
                     continue;
                 }
             };
-            let file: &VersionFile = v
+            let Some(file) = v
                 .files
                 .iter()
                 .find(|f| f.primary)
-                .unwrap_or(&v.files[0]);
+                .or_else(|| v.files.first())
+            else {
+                conflicts.push(json!({ "slug": slug, "issue": "兼容版本没有可下载文件" }));
+                continue;
+            };
             let (client_env, server_env) = match self.modrinth.project(slug).await {
                 Ok(p) => (p.client_side, p.server_side),
                 Err(_) => ("required".to_string(), "required".to_string()),
@@ -337,7 +405,10 @@ impl ToolRegistry {
                     sha1: file.hashes.sha1.clone(),
                     sha512: file.hashes.sha512.clone(),
                 },
-                env: Env { client: client_env, server: server_env },
+                env: Env {
+                    client: client_env,
+                    server: server_env,
+                },
                 downloads: vec![file.url.clone()],
                 file_size: file.size,
             });
@@ -347,7 +418,7 @@ impl ToolRegistry {
             bail!("没有任何 mod 能解析出兼容版本, 组包中止");
         }
 
-        report(progress, "获取 fabric loader 版本".to_string());
+        ctx.report("获取 fabric loader 版本".to_string(), None, None);
         let loader_version = self.fabric_loader_version().await?;
         let mut deps = BTreeMap::new();
         deps.insert("minecraft".to_string(), a.game_version.clone());
@@ -358,12 +429,19 @@ impl ToolRegistry {
             game: "minecraft".into(),
             version_id: format!("rustagent-{}", a.name),
             name: a.name.clone(),
-            summary: format!("由 RustAgent 生成的整合包 (MC {} / {})", a.game_version, a.loader),
+            summary: format!(
+                "由 RustAgent 生成的整合包 (MC {} / {})",
+                a.game_version, a.loader
+            ),
             files,
             dependencies: deps,
         };
 
-        report(progress, format!("写入整合包文件 {} 个 mod", summaries.len()));
+        ctx.report(
+            format!("写入整合包文件 {} 个 mod", summaries.len()),
+            None,
+            None,
+        );
         std::fs::create_dir_all(&self.download_dir)?;
         let safe_name = a.name.replace(['/', '\\', ':', '*'], "-");
         let out_path = self.download_dir.join(format!("{safe_name}.mrpack"));
@@ -411,7 +489,7 @@ impl ToolRegistry {
             source: "chat".to_string(),
             timestamp: chrono::Local::now().to_rfc3339(),
         });
-        db.save(&self.db_path)?;
+        db.save()?;
         Ok(json!({
             "status": "已记录",
             "slug": a.slug,
@@ -441,13 +519,8 @@ impl ToolRegistry {
         }
         let a: Args = serde_json::from_str(args)?;
         let db = crate::database::UserDatabase::load(&self.db_path);
-        let ranked = crate::pipeline::try_this(
-            &self.modrinth,
-            &db,
-            &a.game_version,
-            &a.loader,
-        )
-        .await?;
+        let ranked =
+            crate::pipeline::try_this(&self.modrinth, &db, &a.game_version, &a.loader).await?;
         let take = a.count.unwrap_or(5).clamp(1, 10) as usize;
         let mods: Vec<serde_json::Value> = ranked
             .into_iter()
@@ -466,11 +539,7 @@ impl ToolRegistry {
         Ok(json!({ "recommendations": mods, "db_summary": db.summary() }))
     }
 
-    async fn repair_pack(
-        &self,
-        args: &str,
-        progress: Option<&ProgressTx>,
-    ) -> Result<serde_json::Value> {
+    async fn repair_pack(&self, args: &str, ctx: &TaskCtx) -> Result<serde_json::Value> {
         #[derive(Deserialize)]
         struct Args {
             pack_name: String,
@@ -483,10 +552,7 @@ impl ToolRegistry {
         let safe = a.pack_name.to_lowercase();
         let pack_path = std::fs::read_dir(&self.download_dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension()
-                    .is_some_and(|e| e == "mrpack")
-            })
+            .filter(|p| p.extension().is_some_and(|e| e == "mrpack"))
             .find(|p| {
                 let stem = p
                     .file_stem()
@@ -496,7 +562,11 @@ impl ToolRegistry {
                 stem.contains(&safe) || safe.contains(&stem)
             })
             .ok_or_else(|| {
-                anyhow::anyhow!("在 {} 中找不到整合包 '{}'", self.download_dir.display(), a.pack_name)
+                anyhow::anyhow!(
+                    "在 {} 中找不到整合包 '{}'",
+                    self.download_dir.display(),
+                    a.pack_name
+                )
             })?;
 
         let pack_file = std::fs::File::open(&pack_path)?;
@@ -529,12 +599,17 @@ impl ToolRegistry {
             })
             .unwrap_or_default();
 
-        report(progress, format!("解析依赖闭包 ({} 个 mod)", a.add_slugs.len()));
+        ctx.report(
+            format!("解析依赖闭包 ({} 个 mod)", a.add_slugs.len()),
+            None,
+            None,
+        );
         let (final_slugs, auto_added, closure_conflicts) = crate::pipeline::dependency_closure(
             &self.modrinth,
             &game_version,
             loader,
             &a.add_slugs,
+            ctx,
         )
         .await?;
         let mut conflicts: Vec<String> = closure_conflicts;
@@ -546,7 +621,12 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("索引 files 异常"))?;
         let total = final_slugs.len();
         for (i, slug) in final_slugs.iter().enumerate() {
-            report(progress, format!("正在收集 mod {slug} ({}/{})", i + 1, total));
+            ctx.check_interrupt()?;
+            ctx.report(
+                format!("正在收集 mod {slug} ({}/{})", i + 1, total),
+                Some((i + 1) as u64),
+                Some(total as u64),
+            );
             let versions = match self.modrinth.versions(slug, &game_version, loader).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -561,11 +641,15 @@ impl ToolRegistry {
                     continue;
                 }
             };
-            let file = v
+            let Some(file) = v
                 .files
                 .iter()
                 .find(|f| f.primary)
-                .unwrap_or(&v.files[0]);
+                .or_else(|| v.files.first())
+            else {
+                conflicts.push(format!("{slug}: 兼容版本没有可下载文件"));
+                continue;
+            };
             let path = format!("mods/{}", file.filename);
             if existing.contains(&path) {
                 continue;
@@ -587,7 +671,11 @@ impl ToolRegistry {
 
         let total_mods = files_arr.len();
 
-        report(progress, format!("写入整合包文件 (共 {total_mods} 个 mod)"));
+        ctx.report(
+            format!("写入整合包文件 (共 {total_mods} 个 mod)"),
+            Some(total_mods as u64),
+            Some(total_mods as u64),
+        );
         std::fs::create_dir_all(&self.download_dir)?;
         let out_file = std::fs::File::create(&pack_path)?;
         let mut zip = zip::ZipWriter::new(out_file);

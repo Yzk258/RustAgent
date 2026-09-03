@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde_json::json;
 use std::collections::HashSet;
 
@@ -65,10 +65,17 @@ pub async fn try_this(
     if !tags.is_empty() {
         facets.push(tags.iter().map(|t| format!("categories:{t}")).collect());
     }
-    let index = if tags.is_empty() { "downloads" } else { "updated" };
+    let index = if tags.is_empty() {
+        "downloads"
+    } else {
+        "updated"
+    };
     let hits = client.search("", Some(facets), 20, index).await?.hits;
     let rated = db.rated_slugs();
-    let fresh: Vec<Hit> = hits.into_iter().filter(|h| !rated.contains(&h.slug)).collect();
+    let fresh: Vec<Hit> = hits
+        .into_iter()
+        .filter(|h| !rated.contains(&h.slug))
+        .collect();
     if fresh.is_empty() {
         bail!("没有新的可推荐 mod (数据库中已评价过所有候选), 稍后再试");
     }
@@ -80,6 +87,7 @@ pub async fn dependency_closure(
     game_version: &str,
     loader: &str,
     seeds: &[String],
+    ctx: &crate::tools::TaskCtx,
 ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let mut all: Vec<String> = seeds.to_vec();
     let mut auto_added: Vec<String> = Vec::new();
@@ -92,8 +100,19 @@ pub async fn dependency_closure(
         if frontier.is_empty() {
             break;
         }
+        ctx.check_interrupt()?;
+        ctx.report(
+            format!(
+                "依赖闭包第 {} 轮: 检查 {} 个 mod 的依赖",
+                _pass + 1,
+                frontier.len()
+            ),
+            None,
+            None,
+        );
         let mut next_ids: Vec<String> = Vec::new();
         for slug in &frontier {
+            ctx.check_interrupt()?;
             let versions = match client.versions(slug, game_version, loader).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -104,9 +123,7 @@ pub async fn dependency_closure(
             let v = match versions.first() {
                 Some(v) => v,
                 None => {
-                    conflicts.push(format!(
-                        "{slug}: 没有 {game_version}/{loader} 兼容版本"
-                    ));
+                    conflicts.push(format!("{slug}: 没有 {game_version}/{loader} 兼容版本"));
                     continue;
                 }
             };
@@ -124,6 +141,7 @@ pub async fn dependency_closure(
         }
         let mut new_frontier = Vec::new();
         for id in next_ids {
+            ctx.check_interrupt()?;
             let project = match client.project(&id).await {
                 Ok(p) => p,
                 Err(_) => {
@@ -186,9 +204,12 @@ pub fn translate_keyword(q: &str) -> String {
 }
 
 pub fn is_valid_game_version(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars().next().is_some_and(|c| c.is_ascii_digit())
-        && s.chars().all(|c| c.is_ascii_digit() || c == '.')
+    let parts: Vec<&str> = s.split('.').collect();
+    !parts.is_empty()
+        && parts.len() <= 4
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
 const VALID_LOADERS: [&str; 4] = ["fabric", "forge", "neoforge", "quilt"];
@@ -199,11 +220,7 @@ pub fn is_valid_loader(s: &str) -> bool {
 
 /// 生成 "[界面预设: ...] " 前缀, CLI 的 /set 与 Web 预设栏共用同一注入逻辑。
 /// 无任何有效项时返回 None (原样透传消息)。找包数量单次对话上限 20。
-pub fn preset_prefix(
-    gv: Option<&str>,
-    loader: Option<&str>,
-    limit: Option<u32>,
-) -> Option<String> {
+pub fn preset_prefix(gv: Option<&str>, loader: Option<&str>, limit: Option<u32>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(gv) = gv.map(str::trim).filter(|s| !s.is_empty()) {
         if is_valid_game_version(gv) {
@@ -271,7 +288,7 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
         .database
         .path
         .clone()
-        .unwrap_or_else(|| "userdata.json".to_string());
+        .unwrap_or_else(|| "userdata.db".to_string());
     let mut db = UserDatabase::load(&db_path);
     let client = ModrinthClient::new()?;
     let game_version = "1.21.1";
@@ -308,7 +325,10 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
     } else if VALID_LOADERS.contains(&input_loader.as_str()) {
         &input_loader
     } else {
-        bail!("加载器 '{}' 不支持, 可选: fabric / forge / neoforge / quilt", input_loader);
+        bail!(
+            "加载器 '{}' 不支持, 可选: fabric / forge / neoforge / quilt",
+            input_loader
+        );
     };
     let query_raw = prompt("主题关键词: ");
     if query_raw.is_empty() {
@@ -371,7 +391,7 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
     let registry = ToolRegistry::new(
         ModrinthClient::new()?,
         &cfg.output.download_dir,
-        &cfg.db_path(),
+        cfg.db_path(),
     );
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let pack_name = format!("demo-{ts}");
@@ -383,21 +403,28 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
     })
     .to_string();
     // demo 也走真实进展通道, 终端实时显示 "正在收集 mod x (i/n)"
-    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<crate::tools::ProgressUpdate>();
     let printer = tokio::spawn(async move {
-        while let Some(msg) = prx.recv().await {
-            println!("  ⏳ {msg}");
+        while let Some(u) = prx.recv().await {
+            println!("  ⏳ {}", u.text);
         }
     });
-    let result = registry.execute("build_modpack", &args, Some(&ptx)).await?;
-    drop(ptx);
+    let ctx = crate::tools::TaskCtx {
+        progress: Some(ptx),
+        interrupt: None,
+    };
+    let result = registry.execute("build_modpack", &args, &ctx).await?;
+    drop(ctx); // 释放进展通道, 让打印任务自然结束
     let _ = printer.await;
 
     if let Some(arr) = result.get("auto_added").and_then(|v| v.as_array()) {
         if arr.is_empty() {
             println!("无需自动补全前置依赖");
         } else {
-            let names: Vec<String> = arr.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect();
+            let names: Vec<String> = arr
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect();
             println!("自动补全前置依赖 {} 个: {}", arr.len(), names.join(", "));
         }
     }
@@ -408,7 +435,7 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
         mod_slugs: keep,
         created_at: chrono::Local::now().to_rfc3339(),
     });
-    db.save(&db_path)?;
+    db.save()?;
 
     let weights = db.tag_weights();
     let mut pairs: Vec<(String, f64)> = weights.into_iter().collect();
@@ -425,4 +452,27 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
     );
     println!("\n提示: 再次运行 `cargo run -- demo` 感受排序变化, 或 `cargo run -- demo trythis` 测试推荐");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_versions_and_loaders() {
+        assert!(is_valid_game_version("1.21.1"));
+        assert!(!is_valid_game_version("1..21"));
+        assert!(!is_valid_game_version("v1.21"));
+        assert!(is_valid_loader("fabric"));
+        assert!(!is_valid_loader("vanilla"));
+    }
+
+    #[test]
+    fn preset_prefix_filters_invalid_values() {
+        assert_eq!(
+            preset_prefix(Some("1.21.1"), Some("fabric"), Some(8)),
+            Some("[界面预设: Minecraft 版本 1.21.1 / fabric 加载器 / 候选数量 8] ".into())
+        );
+        assert_eq!(preset_prefix(Some("bad"), Some("vanilla"), Some(0)), None);
+    }
 }

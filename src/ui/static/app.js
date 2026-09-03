@@ -5,21 +5,43 @@
    ============================================================ */
 
 const $ = (id) => document.getElementById(id);
+const DOM = Object.fromEntries(
+  [
+    "messages", "input", "btn-send", "btn-stop", "stat-usage", "stat-db",
+    "session-file", "session-list", "pack-dir", "pack-list", "tag-weights",
+    "tool-list", "model-name", "ver", "status-dot", "status-text",
+    "sel-version", "sel-loader", "sel-limit", "input-limit", "custom-limit-wrap",
+  ].map((id) => [id, $(id)])
+);
+
+const state = {
+  busy: false,
+  presetKey: "rustagent-preset",
+  limitCap: 20,
+};
 
 const API = {
-  get: (path) => fetch(path).then((r) => r.json()),
+  request: async (path, options = {}) => {
+    const response = await fetch(path, options);
+    const body = await response.text();
+    let data;
+    try { data = body ? JSON.parse(body) : {}; } catch { data = { message: body }; }
+    if (!response.ok) throw new Error(data.message || `HTTP ${response.status}`);
+    return data;
+  },
+  get: (path) => API.request(path),
   post: (path, body) =>
-    fetch(path, {
+    API.request(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
-    }).then((r) => r.json()),
+    }),
 };
 
 /* ---------- Toast ---------- */
 let toastTimer = null;
 function toast(msg, isErr = false) {
-  const el = $("toast");
+  const el = document.getElementById("toast");
   el.textContent = msg;
   el.classList.toggle("err", isErr);
   el.classList.remove("hidden");
@@ -40,7 +62,7 @@ function renderText(s) {
 }
 
 function scrollBottom() {
-  const m = $("messages");
+  const m = DOM.messages;
   m.scrollTop = m.scrollHeight;
 }
 
@@ -49,7 +71,7 @@ function addMsg(cls, html) {
   const div = document.createElement("div");
   div.className = "msg " + cls;
   div.innerHTML = html;
-  $("messages").appendChild(div);
+  DOM.messages.appendChild(div);
   scrollBottom();
   return div;
 }
@@ -59,7 +81,7 @@ function addToolLine(name) {
   const div = document.createElement("div");
   div.className = "tool-line pending";
   div.textContent = `⚙ 调用工具 ${name} …`;
-  $("messages").appendChild(div);
+  DOM.messages.appendChild(div);
   scrollBottom();
   return div;
 }
@@ -69,8 +91,16 @@ function addProgressLine() {
   removeWelcome();
   const div = document.createElement("div");
   div.className = "tool-line progress";
-  $("messages").appendChild(div);
+  DOM.messages.appendChild(div);
   return div;
+}
+
+// 数值进展渲染 ▰▱ 进度条 (progress 事件带 current/total 时)
+function progressPrefix(ev) {
+  if (!ev.total) return "";
+  const w = 20;
+  const filled = Math.round(Math.min(ev.current || 0, ev.total) / ev.total * w);
+  return "▰".repeat(filled) + "▱".repeat(w - filled) + ` ${ev.current}/${ev.total} `;
 }
 
 function clearProgress(progress) {
@@ -81,19 +111,29 @@ function clearProgress(progress) {
 }
 
 // "思考中"提示: 覆盖等待 LLM 响应的空窗期 (发出消息后 / 工具结果返回后),
-// 有任何事件到达即消失, 避免用户以为卡死
+// 有任何事件到达即消失, 避免用户以为卡死; 附每秒递增的已等待时长
 function showThinking(thinking) {
   if (thinking.el) return;
   removeWelcome();
   const div = document.createElement("div");
   div.className = "tool-line progress thinking";
   div.textContent = "思考中";
-  $("messages").appendChild(div);
+  DOM.messages.appendChild(div);
   scrollBottom();
   thinking.el = div;
+  const start = Date.now();
+  thinking.timer = setInterval(() => {
+    if (thinking.el) {
+      thinking.el.textContent = `思考中 (${Math.round((Date.now() - start) / 1000)}s)`;
+    }
+  }, 1000);
 }
 
 function hideThinking(thinking) {
+  if (thinking.timer) {
+    clearInterval(thinking.timer);
+    thinking.timer = null;
+  }
   if (thinking.el) {
     thinking.el.remove();
     thinking.el = null;
@@ -105,7 +145,7 @@ function showWelcome() {
   div.className = "welcome";
   div.innerHTML =
     "<b>⛏ RustAgent</b><br>描述你想要的整合包, 例如:<br>“帮我组一个 1.20.1 fabric 的探索向整合包”";
-  $("messages").appendChild(div);
+  DOM.messages.appendChild(div);
 }
 
 function removeWelcome() {
@@ -117,18 +157,21 @@ function removeWelcome() {
 async function loadInfo() {
   try {
     const info = await API.get("/api/info");
-    $("model-name").textContent = `模型: ${info.model}`;
-    $("ver").textContent = "v" + info.version;
-    $("stat-usage").textContent =
+    DOM["model-name"].textContent = `模型: ${info.model}`;
+    DOM.ver.textContent = "v" + info.version;
+    DOM["stat-usage"].textContent =
       `${info.calls} 次调用 · ${info.total_tokens} tokens · ¥${info.cost}`;
+    DOM["session-file"].textContent = info.session_file
+      ? "自动保存: " + info.session_file
+      : "自动保存: 尚无对话";
   } catch { /* 服务器未就绪时静默 */ }
 }
 
 async function loadProfile() {
   try {
     const p = await API.get("/api/profile");
-    $("stat-db").textContent = p.summary;
-    const tags = $("tag-weights");
+    DOM["stat-db"].textContent = p.summary;
+    const tags = DOM["tag-weights"];
     tags.innerHTML = "";
     for (const { tag, weight } of p.tag_weights) {
       const chip = document.createElement("span");
@@ -142,7 +185,7 @@ async function loadProfile() {
 async function loadTools() {
   try {
     const t = await API.get("/api/tools");
-    const ul = $("tool-list");
+    const ul = DOM["tool-list"];
     ul.innerHTML = "";
     for (const tool of t.tools) {
       const li = document.createElement("li");
@@ -157,8 +200,8 @@ async function loadTools() {
 async function loadPacks() {
   try {
     const p = await API.get("/api/packs");
-    $("pack-dir").textContent = "目录: " + p.dir;
-    const ul = $("pack-list");
+    DOM["pack-dir"].textContent = "目录: " + p.dir;
+    const ul = DOM["pack-list"];
     ul.innerHTML = "";
     if (!p.packs.length) {
       const li = document.createElement("li");
@@ -177,34 +220,30 @@ async function loadPacks() {
 }
 
 function refreshSidebar() {
-  loadInfo();
-  loadProfile();
-  loadPacks();
-  loadSessions();
+  return Promise.allSettled([loadInfo(), loadProfile(), loadPacks(), loadSessions()]);
 }
 
 /* ---------- 聊天 (NDJSON 流式) ---------- */
-let busy = false;
-
 function setBusy(b) {
-  busy = b;
-  $("btn-send").disabled = b;
+  state.busy = b;
+  DOM["btn-send"].disabled = b;
   // 忙碌时显示打断按钮 (长任务/长思考时可中止当前轮)
-  $("btn-stop").classList.toggle("hidden", !b);
+  DOM["btn-stop"].classList.toggle("hidden", !b);
 }
 
 async function send() {
-  const input = $("input");
+  const input = DOM.input;
   const text = input.value.trim();
-  if (!text || busy) return;
+  if (!text || state.busy) return;
   input.value = "";
   autoGrow();
   setBusy(true);
 
   addMsg("user", escapeHtml(text));
-  const pending = []; // { name, el, done }
+  const pending = []; // { name, el, done }; replyEl 属性 = 当前流式回复气泡 (本轮共用)
   const progress = { el: null }; // 当前实时进展行 (整个 turn 共用一个, 原地更新)
-  const thinking = { el: null }; // "思考中"提示行状态
+  const thinking = { el: null, timer: null }; // "思考中"行状态 + 每秒计时器
+  pending.replyEl = null;
   showThinking(thinking);
 
   try {
@@ -213,8 +252,8 @@ async function send() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         text,
-        game_version: $("sel-version").value.trim() || undefined,
-        loader: $("sel-loader").value || undefined,
+        game_version: DOM["sel-version"].value.trim() || undefined,
+        loader: DOM["sel-loader"].value || undefined,
         search_limit: currentLimit() || undefined,
       }),
     });
@@ -247,7 +286,7 @@ async function send() {
     hideThinking(thinking);
     setBusy(false);
     refreshSidebar();
-    $("input").focus();
+    DOM.input.focus();
   }
 }
 
@@ -274,13 +313,27 @@ function handleEvent(ev, pending, progress, thinking) {
     case "progress":
       hideThinking(thinking);
       if (!progress.el) progress.el = addProgressLine();
-      progress.el.textContent = `⏳ ${ev.text}`;
+      progress.el.textContent = `⏳ ${progressPrefix(ev)}${ev.text}`;
       scrollBottom();
       break;
+    case "reply_delta": {
+      // 流式打字机: 增量阶段用纯文本追加, 完整 reply 到达后用 markdown 重渲染
+      hideThinking(thinking);
+      clearProgress(progress);
+      if (!pending.replyEl) pending.replyEl = addMsg("assistant", "");
+      pending.replyEl.textContent += ev.text;
+      scrollBottom();
+      break;
+    }
     case "reply":
       hideThinking(thinking);
       clearProgress(progress);
-      addMsg("assistant", renderText(ev.text));
+      if (pending.replyEl) {
+        pending.replyEl.innerHTML = renderText(ev.text);
+        pending.replyEl = null;
+      } else {
+        addMsg("assistant", renderText(ev.text));
+      }
       break;
     case "error":
       hideThinking(thinking);
@@ -290,14 +343,15 @@ function handleEvent(ev, pending, progress, thinking) {
     case "done":
       hideThinking(thinking);
       clearProgress(progress);
-      $("stat-usage").textContent = ev.usage;
+      DOM["stat-usage"].textContent = ev.usage;
+      if (ev.saved) loadSessions(); // 本轮已自动保存, 立即刷新会话列表
       break;
   }
 }
 
 /* ---------- 会话管理 ---------- */
 async function session(action) {
-  if (busy && (action === "new" || action === "import")) {
+  if (state.busy && (action === "new" || action === "import")) {
     toast("请等待本轮对话结束", true);
     return;
   }
@@ -306,7 +360,7 @@ async function session(action) {
     toast(r.message, !r.ok);
     if (r.ok && Array.isArray(r.messages)) renderHistory(r.messages);
     if (action === "new" && r.ok) {
-      $("messages").innerHTML = "";
+      DOM.messages.innerHTML = "";
       showWelcome();
       refreshSidebar();
     }
@@ -317,7 +371,7 @@ async function session(action) {
 
 // 导入指定会话文件 (点击会话列表条目触发)
 async function importSession(name) {
-  if (busy) {
+  if (state.busy) {
     toast("请等待本轮对话结束", true);
     return;
   }
@@ -335,17 +389,17 @@ async function importSession(name) {
 
 // 把导入/加载的历史消息渲染到聊天区
 function renderHistory(messages) {
-  $("messages").innerHTML = "";
+  DOM.messages.innerHTML = "";
   for (const m of messages) {
     if (m.kind === "user") {
       addMsg("user", escapeHtml(m.text));
     } else if (m.kind === "assistant") {
       addMsg("assistant", renderText(m.text));
     } else {
-      const div = document.createElement("div");
+  const div = document.createElement("div");
       div.className = "tool-line ok";
       div.textContent = "⚙ " + m.text;
-      $("messages").appendChild(div);
+  DOM.messages.appendChild(div);
     }
   }
   if (!messages.length) showWelcome();
@@ -356,7 +410,7 @@ function renderHistory(messages) {
 async function loadSessions() {
   try {
     const s = await API.get("/api/sessions");
-    const ul = $("session-list");
+    const ul = DOM["session-list"];
     ul.innerHTML = "";
     if (!s.sessions.length) {
       ul.innerHTML = '<li><span class="pmeta">暂无会话记录</span></li>';
@@ -377,8 +431,8 @@ async function loadSessions() {
 
 /* ---------- 健康检查 ---------- */
 async function checkHealth() {
-  const dot = $("status-dot");
-  const txt = $("status-text");
+  const dot = DOM["status-dot"];
+  const txt = DOM["status-text"];
   try {
     await API.get("/api/health");
     dot.className = "dot ok";
@@ -390,8 +444,7 @@ async function checkHealth() {
 }
 
 /* ---------- 预设选项栏 (版本/加载器/找包数量) ---------- */
-const PRESET_KEY = "rustagent-preset";
-const LIMIT_CAP = 20; // 单次对话找包数量上限
+// Persistent controls are kept in one state object.
 
 // 生效的找包数量: 预设档位直取, 自定义档位钳制到 1..=20
 function currentLimit() {
@@ -399,7 +452,7 @@ function currentLimit() {
   if (v !== "custom") return parseInt(v, 10);
   const n = parseInt($("input-limit").value, 10);
   if (!n || n < 1) return undefined;
-  return Math.min(n, LIMIT_CAP);
+  return Math.min(n, state.limitCap);
 }
 
 // 自定义档位时才显示数字输入框和上限提醒
@@ -409,7 +462,7 @@ function updateCustomLimit() {
 }
 
 function savePreset() {
-  localStorage.setItem(PRESET_KEY, JSON.stringify({
+  localStorage.setItem(state.presetKey, JSON.stringify({
     game_version: $("sel-version").value.trim(),
     loader: $("sel-loader").value,
     search_limit: $("sel-limit").value,
@@ -419,7 +472,7 @@ function savePreset() {
 
 function loadPreset() {
   try {
-    const p = JSON.parse(localStorage.getItem(PRESET_KEY) || "{}");
+    const p = JSON.parse(localStorage.getItem(state.presetKey) || "{}");
     if (p.game_version) $("sel-version").value = p.game_version;
     if (p.loader) $("sel-loader").value = p.loader;
     if (p.search_limit) $("sel-limit").value = p.search_limit;
@@ -436,14 +489,16 @@ function autoGrow() {
 }
 
 /* ---------- 事件绑定与启动 ---------- */
-$("input").addEventListener("keydown", (e) => {
+DOM.input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     send();
   }
 });
-$("input").addEventListener("input", autoGrow);
+DOM.input.addEventListener("input", autoGrow);
 $("btn-send").addEventListener("click", send);
+$("inputbar").addEventListener("submit", (e) => { e.preventDefault(); send(); });
+$("presetbar").addEventListener("submit", (e) => e.preventDefault());
 $("btn-stop").addEventListener("click", async () => {
   try {
     const r = await API.post("/api/chat/interrupt");
@@ -486,4 +541,4 @@ showWelcome();
 checkHealth();
 refreshSidebar();
 loadTools();
-$("input").focus();
+DOM.input.focus();

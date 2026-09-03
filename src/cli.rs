@@ -54,9 +54,21 @@ pub fn print_banner(cfg: &Config) {
 
     println!("{}", paint(ACCENT, &format!("╭{line}╮")));
     let pad = " ".repeat(inner - display_width(&title));
-    println!("{} {}{} {}", paint(ACCENT, "│"), paint(BOLD, &title), pad, paint(ACCENT, "│"));
+    println!(
+        "{} {}{} {}",
+        paint(ACCENT, "│"),
+        paint(BOLD, &title),
+        pad,
+        paint(ACCENT, "│")
+    );
     let pad = " ".repeat(inner - display_width(&sub));
-    println!("{} {}{} {}", paint(ACCENT, "│"), paint(DIM, &sub), pad, paint(ACCENT, "│"));
+    println!(
+        "{} {}{} {}",
+        paint(ACCENT, "│"),
+        paint(DIM, &sub),
+        pad,
+        paint(ACCENT, "│")
+    );
     println!("{}", paint(ACCENT, &format!("╰{line}╯")));
 
     println!(
@@ -70,7 +82,7 @@ pub fn print_banner(cfg: &Config) {
         "{}",
         paint(
             DIM,
-            "  Ctrl+C 打断当前任务 (不退出) · 示例: 我想要 1.21.1 fabric 的生存整合包"
+            "  每轮对话自动保存 · Ctrl+C 打断当前任务 (不退出) · 示例: 我想要 1.21.1 fabric 的生存整合包"
         )
     );
 }
@@ -87,4 +99,72 @@ pub fn print_prompt(preset_tag: Option<&str>) {
 /// 任务开始提示 (等待 LLM 首个事件期间给用户反馈)
 pub fn print_busy_hint() {
     println!("{}", paint(DIM, "  ✻ 处理中, Ctrl+C 可打断"));
+}
+
+/// 长任务实时进展渲染: 数值进度画 ▰▱ 条, 同一行原地刷新 (\r + 清行)。
+/// 零依赖 ANSI 而非 indicatif: REPL Ctrl+C 直接 abort 打印任务, 自绘行只是
+/// 停在原地不会残留刷新; 三方库的全局 draw target 在该场景下会持续抢占 stdout。
+pub struct ProgressPrinter {
+    active: bool,
+}
+
+impl ProgressPrinter {
+    pub fn new() -> Self {
+        Self { active: false }
+    }
+
+    fn clear(&mut self) {
+        if self.active {
+            let _ = write!(std::io::stdout(), "\r\x1b[2K");
+            self.active = false;
+        }
+    }
+
+    /// 进展事件: 原地覆盖刷新同一行; 有 current/total 时附进度条
+    pub fn progress(&mut self, text: &str, current: Option<u64>, total: Option<u64>) {
+        let bar = match (current, total) {
+            (Some(c), Some(t)) if t > 0 => {
+                const W: usize = 20;
+                let filled = ((c.min(t) as f64 / t as f64) * W as f64).round() as usize;
+                format!("{}{} {c}/{t} ", "▰".repeat(filled), "▱".repeat(W - filled))
+            }
+            _ => String::new(),
+        };
+        self.clear();
+        let _ = write!(std::io::stdout(), "  {} {bar}{text}", paint(YELLOW, "⏳"));
+        let _ = std::io::stdout().flush();
+        self.active = true;
+    }
+
+    /// 普通行 (工具开始/结束): 先清掉进展行, 再整行打印
+    pub fn line(&mut self, s: &str) {
+        self.clear();
+        println!("{s}");
+    }
+
+    /// 多行文本 (最终回复, 无流式增量的兜底路径)
+    pub fn text(&mut self, s: &str) {
+        self.clear();
+        println!("\n{s}\n");
+    }
+
+    /// 流式回复增量: 逐片段直接输出 (打字机效果), 首个片段前空一行分隔
+    pub fn delta(&mut self, s: &str, streaming: &mut bool) {
+        self.clear();
+        if !*streaming {
+            println!();
+            *streaming = true;
+        }
+        let _ = write!(std::io::stdout(), "{s}");
+        let _ = std::io::stdout().flush();
+    }
+
+    /// 流式回复结束: 已逐字输出则仅换行收尾, 否则完整打印 (无增量时的兜底)
+    pub fn reply_end(&mut self, full: &str, streaming: bool) {
+        if streaming {
+            println!("\n");
+        } else {
+            self.text(full);
+        }
+    }
 }

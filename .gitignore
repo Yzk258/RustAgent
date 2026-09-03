@@ -9,6 +9,8 @@ downloads/
 sessions/
 userdata.db*
 userdata.json
+*.db-shm
+*.db-wal
 *.mrpack
 
 AGENTS.md
