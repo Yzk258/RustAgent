@@ -103,6 +103,12 @@ cargo fmt / cargo clippy        # 格式化 / 静态检查
 - `style.css` 增加预设换行、移动端间距、气泡宽度和滚动槽规则，改善手机窄屏布局。
 - 验证：`node --check src/ui/static/app.js` 通过；`cargo test` 4 个测试全部通过；`git diff --check` 无错误。
 
+## 2026-09-05：README 用户文档同步
+
+- 启动一节补充 CLI 流式回复输出、组包 ▰▱ 进度条、3s 兜底提示与 Ctrl+C 打断说明。
+- 项目结构补上 `src/cli.rs`；agent/llm/database/history/config 的职责描述同步最新实现（流式、SQLite、自动保存、启动校验）。
+- 纯文档改动，无代码变更。
+
 ## 待办 / TODO
 
 - [ ] 优化根据prompt随机找包机制（固定公式->带有一定随机分布避免重复）

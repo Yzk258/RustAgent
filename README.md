@@ -60,7 +60,7 @@ path = "./userdata.db"                     # 用户口味数据库
 cargo run
 ```
 
-进入交互式终端后直接对话即可，界面采用仿 opencode / claude code 风格：圆角边框横幅、`❯` 提示符（激活预设时显示标签）、工具调用彩色状态行。示例：
+进入交互式终端后直接对话即可，界面采用仿 opencode / claude code 风格：圆角边框横幅、`❯` 提示符（激活预设时显示标签）、工具调用彩色状态行；回复流式逐字输出（打字机效果），组包等长任务带 ▰▱ 进度条实时刷新，超 3 秒的操作有"仍在执行…"兜底提示，随时 `Ctrl+C` 打断。示例：
 
 ```
 ╭──────────────────────────────────────────╮
@@ -131,14 +131,15 @@ agent 通过函数调用（tool calling）驱动以下工具，所有 mod 数据
 ```
 src/
 ├── main.rs       # 入口: 交互式 CLI、子命令分发
-├── agent.rs      # Agent 主循环: LLM 对话、工具调度、上下文裁剪、预算控制
-├── llm.rs        # OpenAI 兼容 LLM 客户端 (含 tool calling)
+├── cli.rs        # CLI 视觉样式: 圆角横幅、ANSI 配色、CJK 宽度对齐、进度条
+├── agent.rs      # Agent 主循环: LLM 对话、工具调度、上下文裁剪、预算控制、打断与进展反馈
+├── llm.rs        # OpenAI 兼容 LLM 客户端 (含 tool calling 与流式输出)
 ├── tools.rs      # 工具注册表: 搜索/组包/反馈/修复的具体实现
 ├── modrinth.rs   # Modrinth API 客户端
 ├── pipeline.rs   # 纯逻辑管线: 排序、口味标签、依赖闭包 (可脱离 LLM 演示)
-├── database.rs   # 用户口味数据库
-├── history.rs    # 会话保存/加载
-├── config.rs     # config.toml 解析
+├── database.rs   # 用户口味数据库 (SQLite)
+├── history.rs    # 会话保存/加载 (含每轮自动保存)
+├── config.rs     # config.toml 解析与启动校验
 └── ui/           # Web 界面: axum 服务器 + REST/流式 API + 内嵌前端三件套
 ```
 
