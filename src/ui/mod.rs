@@ -25,6 +25,8 @@ pub struct AppState {
     pub agent: Arc<tokio::sync::Mutex<Agent>>,
     pub cfg: Config,
     pub interrupt: Arc<AtomicBool>,
+    /// Modrinth 客户端: 供"试试这个"推荐与反馈接口独立使用, 不持 agent 锁, 与对话流并行。
+    pub modrinth: crate::modrinth::ModrinthClient,
 }
 
 /// 内嵌的静态前端文件 (编译期打包进二进制)
@@ -45,10 +47,12 @@ pub async fn serve(cfg: Config) -> Result<()> {
         .await?,
     ));
     let port = cfg.ui.port;
+    let modrinth = crate::modrinth::ModrinthClient::new()?;
     let state = AppState {
         agent,
         cfg,
         interrupt,
+        modrinth,
     };
 
     let app = router(state);
@@ -93,6 +97,9 @@ fn router(state: AppState) -> Router {
         .route("/api/profile", get(api::profile))
         .route("/api/packs", get(api::packs))
         .route("/api/packs/open", post(api::packs_open))
+        // "试试这个"推荐 + 反馈 (不持 agent 锁, 与对话流并行)
+        .route("/api/recommend", get(api::recommend))
+        .route("/api/feedback", post(api::feedback))
         // 聊天 (NDJSON 流式返回 Agent 事件)
         .route("/api/chat", post(api::chat))
         .route("/api/chat/interrupt", post(api::chat_interrupt))

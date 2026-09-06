@@ -119,6 +119,24 @@ body {
 .pack-list li.clickable:hover { background: var(--accent-soft); }
 .pack-list li.invalid { opacity: 0.45; }
 
+/* "试试这个"推荐列表 (不持 agent 锁, 与对话并行) */
+.rec-list { list-style: none; display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.rec-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.rec-item.rated { opacity: 0.5; }
+.rec-name { font-family: var(--mono); font-size: 13px; color: var(--text); }
+.rec-desc { font-size: 11px; color: var(--text-dim); margin-top: 3px; line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.rec-meta { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.rec-meta .tscore { color: var(--accent); }
+.rec-btns { display: flex; gap: 6px; margin-top: 6px; }
+.rec-btns button {
+  padding: 3px 10px; font-size: 12px; border-radius: 6px;
+  background: var(--bg-bubble); border: 1px solid var(--border);
+}
+.rec-btns button:hover { border-color: var(--accent); }
+.rec-btns button.liked { border-color: var(--green); color: var(--green); }
+.rec-btns button.disliked { border-color: var(--red); color: var(--red); }
+.rec-btns button:disabled { opacity: 0.5; cursor: default; }
+
 /* ---------- 聊天区 ---------- */
 #chat {
   grid-area: chat;

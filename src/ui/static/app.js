@@ -11,6 +11,7 @@ const DOM = Object.fromEntries(
     "session-file", "session-list", "pack-dir", "pack-list", "tag-weights",
     "tool-list", "model-name", "ver", "status-dot", "status-text",
     "sel-version", "sel-loader", "sel-limit", "input-limit", "custom-limit-wrap",
+    "btn-rec", "rec-list", "rec-hint",
   ].map((id) => [id, $(id)])
 );
 
@@ -221,6 +222,81 @@ async function loadPacks() {
 
 function refreshSidebar() {
   return Promise.allSettled([loadInfo(), loadProfile(), loadPacks(), loadSessions()]);
+}
+
+// 下载量格式化: 12.3M / 5.6K
+function fmtDownloads(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  return String(n);
+}
+
+/* ---------- "试试这个" 推荐 (不持 agent 锁, 与对话并行) ---------- */
+async function loadRecommend() {
+  const gv = DOM["sel-version"].value.trim();
+  if (!gv) {
+    DOM["rec-hint"].textContent = "请先在预设栏选择 MC 版本";
+    DOM["rec-hint"].classList.remove("hidden");
+    DOM["rec-list"].innerHTML = "";
+    return;
+  }
+  DOM["rec-hint"].textContent = "拉取中…";
+  DOM["rec-hint"].classList.remove("hidden");
+  DOM["rec-list"].innerHTML = "";
+  try {
+    const r = await API.get(
+      `/api/recommend?game_version=${encodeURIComponent(gv)}&loader=${encodeURIComponent(DOM["sel-loader"].value)}`
+    );
+    if (!r.ok) {
+      DOM["rec-hint"].textContent = r.message || "拉取失败";
+      return;
+    }
+    DOM["rec-hint"].classList.add("hidden");
+    const ul = DOM["rec-list"];
+    ul.innerHTML = "";
+    for (const m of r.recommendations) {
+      const li = document.createElement("li");
+      li.className = "rec-item";
+      li.dataset.slug = m.slug;
+      li.innerHTML =
+        `<div class="rec-name">${escapeHtml(m.title)} <span class="pmeta">${escapeHtml(m.slug)}</span></div>` +
+        `<div class="rec-desc">${escapeHtml(m.description)}</div>` +
+        `<div class="rec-meta">${fmtDownloads(m.downloads)} 下载` +
+        (m.categories?.length ? ` · ${escapeHtml(m.categories.join(", "))}` : "") +
+        ` · <span class="tscore">口味 ${m.taste_score.toFixed(1)}</span></div>`;
+      const btns = document.createElement("div");
+      btns.className = "rec-btns";
+      const likeBtn = document.createElement("button");
+      likeBtn.textContent = "👍";
+      likeBtn.onclick = () => rateRec(m.slug, "like", li, likeBtn);
+      const dislikeBtn = document.createElement("button");
+      dislikeBtn.textContent = "👎";
+      dislikeBtn.onclick = () => rateRec(m.slug, "dislike", li, dislikeBtn);
+      btns.append(likeBtn, dislikeBtn);
+      li.appendChild(btns);
+      ul.appendChild(li);
+    }
+  } catch {
+    DOM["rec-hint"].textContent = "请求失败";
+  }
+}
+
+// 点 👍/👎 即写库 (不经过 LLM, 不阻塞对话), 成功后标记该项并刷新统计
+async function rateRec(slug, verdict, item, btn) {
+  try {
+    const r = await API.post("/api/feedback", { slug, verdict });
+    toast(r.ok ? `已记录 ${verdict === "like" ? "喜欢" : "不喜欢"} ${slug}` : (r.message || "失败"), !r.ok);
+    if (!r.ok) return;
+    item.classList.add("rated");
+    // 该项两个按钮都禁用, 当前操作高亮
+    item.querySelectorAll(".rec-btns button").forEach((b) => (b.disabled = true));
+    btn.classList.add(verdict === "like" ? "liked" : "disliked");
+    // 反馈改变了口味数据, 刷新统计与标签权重
+    loadProfile();
+    loadInfo();
+  } catch {
+    toast("请求失败", true);
+  }
 }
 
 /* ---------- 聊天 (NDJSON 流式) ---------- */
@@ -542,10 +618,12 @@ $("btn-open-dir").addEventListener("click", async () => {
     toast("请求失败", true);
   }
 });
+$("btn-rec").addEventListener("click", loadRecommend);
 
 loadPreset();
 showWelcome();
 checkHealth();
 refreshSidebar();
 loadTools();
+loadRecommend();
 DOM.input.focus();

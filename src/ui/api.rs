@@ -4,7 +4,7 @@
 //! 前端在 app.js 的 `API` 对象里加对应调用即可, 三步完成一次功能扩展。
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
@@ -135,6 +135,92 @@ fn open_in_file_manager(path: &str) -> anyhow::Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     std::process::Command::new("xdg-open").arg(path).spawn()?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// "试试这个" 推荐 + 反馈 (不持 agent 锁, 与对话流并行)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct RecommendParams {
+    pub game_version: String,
+    #[serde(default)]
+    pub loader: String,
+}
+
+/// 根据 MC 版本/加载器与用户口味推荐 5 个新 mod (复用 pipeline::try_this)。
+/// 独立于 agent 锁: 对话进行中也可调用, 不阻塞聊天流。
+pub async fn recommend(
+    State(state): SharedState,
+    Query(params): Query<RecommendParams>,
+) -> Json<Value> {
+    let db = crate::database::UserDatabase::load(&state.cfg.db_path());
+    match crate::pipeline::try_this(&state.modrinth, &db, &params.game_version, &params.loader)
+        .await
+    {
+        Ok(ranked) => {
+            let mods: Vec<Value> = ranked
+                .iter()
+                .take(5)
+                .map(|s| {
+                    json!({
+                        "slug": s.hit.slug,
+                        "title": s.hit.title,
+                        "description": s.hit.description,
+                        "downloads": s.hit.downloads,
+                        "categories": s.hit.display_categories,
+                        "taste_score": s.score,
+                    })
+                })
+                .collect();
+            Json(json!({ "ok": true, "recommendations": mods, "db_summary": db.summary() }))
+        }
+        Err(e) => Json(json!({
+            "ok": false,
+            "message": format!("{e:#}"),
+            "recommendations": []
+        })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FeedbackRequest {
+    pub slug: String,
+    pub verdict: String,
+}
+
+/// 记录喜欢/不喜欢 (写入用户数据库)。与对话工具 record_feedback 同一写库逻辑,
+/// 但不经过 LLM, 不持 agent 锁, 点击即生效。
+pub async fn feedback(
+    State(state): SharedState,
+    Json(req): Json<FeedbackRequest>,
+) -> Json<Value> {
+    if req.verdict != "like" && req.verdict != "dislike" {
+        return Json(json!({ "ok": false, "message": "verdict 必须是 like 或 dislike" }));
+    }
+    let mut db = crate::database::UserDatabase::load(&state.cfg.db_path());
+    let tags = match state.modrinth.project(&req.slug).await {
+        Ok(p) => crate::pipeline::taste_tags(&p.categories),
+        Err(_) => Vec::new(),
+    };
+    db.rate(crate::database::FeedbackRecord {
+        slug: req.slug.clone(),
+        verdict: req.verdict.clone(),
+        tags: tags.clone(),
+        game_version: String::new(),
+        loader: String::new(),
+        source: "web".to_string(),
+        timestamp: chrono::Local::now().to_rfc3339(),
+    });
+    match db.save() {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "slug": req.slug,
+            "verdict": req.verdict,
+            "db_summary": db.summary()
+        })),
+        Err(e) => Json(json!({ "ok": false, "message": format!("{e:#}") })),
+    }
 }
 
 // ---------------------------------------------------------------------------
