@@ -1,4 +1,4 @@
-# 这是一个示例配置文件, 请将其复制为 config.toml 并修改为自己的配置
+# !!!!!!!!这是一个示例配置文件, 请将其复制为 config.toml 并修改为自己的配置!!!!!!!!!!!
 [llm]
 # LLM 配置
 base_url = "https://api.deepseek.com/v1"
@@ -9,12 +9,13 @@ price_input_per_m = 0.27  # 每百万 token 的输入价格
 price_output_per_m = 1.1  # 每百万 token 的输出价格
 token_budget = 2000000    # 一轮对话最大 token 数量, 超过该数量将会截断对话上下文, 以节省成本
 max_tool_iterations = 32  # 一轮对话最多工具调用次数, 对于更复杂组包需求可调大
+
 # 思考模式: auto 或省略 = 不发送任何参数; 其余按 key=value 原样透传给 API (逗号分隔多组)
 # 例: thinking = "enable_thinking=false"     # Qwen 等兼容端关闭思考
 #     thinking = "reasoning_effort=medium"   # OpenAI o/gpt-5 系列推理力度
 #     thinking = 'thinking={"type":"enabled","budget_tokens":4096}'   # Claude 兼容端
 # DeepSeek 系列把 model 换成 deepseek-reasoner 即可, 无需此参数
-# thinking = "auto"
+thinking = "auto"
 
 [output]
 # 整合包输出目录, 默认与用户数据根目录 (database.path 的父目录) 合并存放
@@ -23,3 +24,6 @@ download_dir = "./userdata/downloads"
 [database]
 # 用户数据根目录 = 本文件的父目录: userdata.db / sessions/ / downloads/ 都在里面
 path = "./userdata/userdata.db"
+
+[ui]
+port = 1780 # Web 界面端口 (cargo run -- ui)

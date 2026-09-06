@@ -292,7 +292,7 @@ pub async fn chat_interrupt(State(state): SharedState) -> Json<Value> {
     Json(json!({ "ok": true, "message": "已发送打断请求, 任务将在安全点停止" }))
 }
 
-/// 保存当前会话到 sessions/
+/// 保存当前会话到 userdata/sessions/
 pub async fn session_save(State(state): SharedState) -> Json<Value> {
     let ag = state.agent.lock().await;
     match history::save(&ag, &state.cfg.data_dir()) {
