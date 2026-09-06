@@ -269,6 +269,8 @@ body {
 #custom-limit-wrap.hidden { display: none; }
 #custom-limit-wrap input { width: 64px; }
 #custom-limit-wrap .cap { font-size: 11px; color: var(--red); opacity: 0.85; white-space: nowrap; }
+/* 通用 .hidden 类: 用于任意元素隐藏 (rec-hint 等侧栏提示行) */
+.hidden { display: none !important; }
 #presetbar .hint {
   margin-left: auto;
   font-size: 11px;

@@ -87,9 +87,22 @@ impl ModrinthClient {
         limit: u32,
         index: &str,
     ) -> Result<SearchResponse> {
+        self.search_with(query, facets, limit, 0, index).await
+    }
+
+    /// 带偏移量的搜索: 从第 offset 条结果开始取 limit 条, 用于"试试这个"随机翻页避免重复。
+    pub async fn search_with(
+        &self,
+        query: &str,
+        facets: Option<Vec<Vec<String>>>,
+        limit: u32,
+        offset: u32,
+        index: &str,
+    ) -> Result<SearchResponse> {
         let mut params: Vec<(&str, String)> = vec![
             ("query", query.to_string()),
             ("limit", limit.to_string()),
+            ("offset", offset.to_string()),
             ("index", index.to_string()),
         ];
         if let Some(f) = &facets {

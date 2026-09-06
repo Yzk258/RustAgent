@@ -25,9 +25,12 @@ pub fn rank(hits: Vec<Hit>, db: &UserDatabase) -> Vec<ScoredHit> {
             ScoredHit { hit, score }
         })
         .collect();
+    // 随机微扰口味分 (-0.5..0.5), 让同分 (尤其空口味时全是 0.0) 的 mod 不再固定按下载量死排,
+    // 每次点"换一批"顺序都有变化, 但高口味项仍大概率靠前
     scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        let sa = a.score + rand::random::<f64>() - 0.5;
+        let sb = b.score + rand::random::<f64>() - 0.5;
+        sb.partial_cmp(&sa)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(b.hit.downloads.cmp(&a.hit.downloads))
     });
@@ -70,7 +73,12 @@ pub async fn try_this(
     } else {
         "updated"
     };
-    let hits = client.search("", Some(facets), 20, index).await?.hits;
+    // 随机翻页: 0..5 页内随机偏移, 每次点"换一批"都从不同窗口取候选, 避免结果一成不变
+    let offset = (rand::random::<u32>() % 5) * 20;
+    let hits = client
+        .search_with("", Some(facets), 20, offset, index)
+        .await?
+        .hits;
     let rated = db.rated_slugs();
     let fresh: Vec<Hit> = hits
         .into_iter()

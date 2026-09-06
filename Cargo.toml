@@ -17,3 +17,4 @@ toml = "0.8"
 zip = "2"
 chrono = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
+rand = "0.8"
