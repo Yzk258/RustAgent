@@ -7,7 +7,7 @@
 const $ = (id) => document.getElementById(id);
 const DOM = Object.fromEntries(
   [
-    "messages", "input", "btn-send", "btn-stop", "stat-usage", "stat-db",
+    "messages", "input", "btn-send", "btn-stop", "stat-usage", "stat-turn", "stat-db",
     "session-file", "session-list", "pack-dir", "pack-list", "tag-weights",
     "tool-list", "model-name", "ver", "status-dot", "status-text",
     "sel-version", "sel-loader", "sel-limit", "input-limit", "custom-limit-wrap",
@@ -294,6 +294,9 @@ function handleEvent(ev, pending, progress, thinking) {
   switch (ev.type) {
     case "tool_call":
       hideThinking(thinking);
+      // 结束当前回复气泡: 工具调用后的新文本应出现在工具行下方,
+      // 而不是续写到工具行上方的旧气泡里 (否则多轮工具调用时回复会把工具行夹在中间)
+      pending.replyEl = null;
       pending.push({ name: ev.name, el: addToolLine(ev.name), done: false });
       break;
     case "tool_result": {
@@ -339,6 +342,10 @@ function handleEvent(ev, pending, progress, thinking) {
       hideThinking(thinking);
       clearProgress(progress);
       addMsg("error", escapeHtml(ev.message));
+      break;
+    case "llm_usage":
+      DOM["stat-turn"].textContent =
+        `上次调用 · 输入 ${ev.prompt_tokens} · 输出 ${ev.completion_tokens} · 合计 ${ev.total_tokens} tok`;
       break;
     case "done":
       hideThinking(thinking);

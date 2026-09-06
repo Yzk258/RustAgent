@@ -454,6 +454,18 @@ impl ToolRegistry {
         zip.write_all(serde_json::to_string_pretty(&index)?.as_bytes())?;
         zip.finish()?;
 
+        // 记录组包到用户数据库 (失败不阻断已生成的 .mrpack; final_slugs 含用户所选+自动补全的完整闭包)
+        let mut db = crate::database::UserDatabase::load(&self.db_path);
+        db.packs.push(crate::database::PackRecord {
+            name: a.name.clone(),
+            mod_slugs: final_slugs.clone(),
+            created_at: chrono::Local::now().to_rfc3339(),
+        });
+        let db_summary = match db.save() {
+            Ok(()) => db.summary(),
+            Err(_) => String::new(),
+        };
+
         Ok(json!({
             "output_path": out_path.display().to_string(),
             "mod_count": summaries.len(),
@@ -461,6 +473,7 @@ impl ToolRegistry {
             "auto_added": auto_added,
             "mods": summaries,
             "conflicts": conflicts,
+            "db_summary": db_summary,
             "note": if conflicts.is_empty() { "无冲突" } else { "存在冲突条目, 请向用户说明" },
         }))
     }

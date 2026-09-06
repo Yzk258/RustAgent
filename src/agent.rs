@@ -27,6 +27,12 @@ pub enum AgentEvent {
     ReplyDelta { text: String },
     /// 最终自然语言回复 (完整文本, 紧跟在 ReplyDelta 序列之后)
     Reply { text: String },
+    /// 单次 LLM API 调用返回的 token 用量 (每次 chat_stream 成功后发出, 供前端实时展示)
+    LlmUsage {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        total_tokens: u64,
+    },
 }
 
 const SYSTEM_PROMPT: &str = "你是 Minecraft 模组管理助手 RustAgent。核心原则: 你负责理解与沟通, 正确性由工具保证 —— 绝不凭记忆推荐 mod, 一切 mod 数据必须来自工具返回的真实 API 数据。
@@ -132,6 +138,7 @@ impl Agent {
                         pp.reply_end(&text, streaming);
                         streaming = false;
                     }
+                    AgentEvent::LlmUsage { .. } => { /* 用量事件: Web 侧栏用, CLI 不打印 */ }
                 }
             }
         });
@@ -199,6 +206,12 @@ impl Agent {
             };
             llm_watchdog.abort();
             self.accumulate(&result.usage);
+            let u = &result.usage;
+            let _ = tx.send(AgentEvent::LlmUsage {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+            });
             let msg = result.message;
 
             match msg.tool_calls.clone() {

@@ -222,6 +222,16 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
                         json!({ "type": "reply_delta", "text": text })
                     }
                     AgentEvent::Reply { text } => json!({ "type": "reply", "text": text }),
+                    AgentEvent::LlmUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                    } => json!({
+                        "type": "llm_usage",
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens
+                    }),
                 };
                 let _ = fwd_tx.send(Ok(Bytes::from(format!("{line}\n"))));
             }
