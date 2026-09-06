@@ -27,6 +27,10 @@ pub struct LlmConfig {
     /// 一轮对话最多工具调用次数 (超过即中止), 复杂组包需求搜索多, 默认 16
     #[serde(default = "default_max_tool_iterations")]
     pub max_tool_iterations: u32,
+    /// 思考模式透传: auto/省略 = 不发送参数; 其余按 key=value (逗号分隔多组)
+    /// 原样并入请求体, 如 enable_thinking=false / reasoning_effort=medium
+    #[serde(default)]
+    pub thinking: Option<String>,
 }
 
 fn default_context_length() -> u64 {
@@ -71,7 +75,16 @@ impl Config {
         self.database
             .path
             .clone()
-            .unwrap_or_else(|| "userdata.db".to_string())
+            .unwrap_or_else(|| "userdata/userdata.db".to_string())
+    }
+
+    /// 用户数据根目录 (db 文件所在目录), 会话与整合包目录由它派生
+    pub fn data_dir(&self) -> String {
+        std::path::Path::new(&self.db_path())
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string())
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -88,6 +101,15 @@ impl Config {
         }
         if self.llm.max_tool_iterations == 0 {
             bail!("max_tool_iterations 必须大于 0");
+        }
+        if let Some(t) = &self.llm.thinking {
+            let ok = t.split(',').all(|seg| {
+                let seg = seg.trim();
+                seg.is_empty() || seg.eq_ignore_ascii_case("auto") || seg.contains('=')
+            });
+            if !ok {
+                bail!("llm.thinking 应为 key=value (逗号分隔多组) 或 auto, 例如 enable_thinking=false");
+            }
         }
         if self.output.download_dir.trim().is_empty() {
             bail!("output.download_dir 不能为空");

@@ -284,11 +284,7 @@ fn print_candidates(ranked: &[ScoredHit]) {
 }
 
 pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
-    let db_path = cfg
-        .database
-        .path
-        .clone()
-        .unwrap_or_else(|| "userdata.db".to_string());
+    let db_path = cfg.db_path();
     let mut db = UserDatabase::load(&db_path);
     let client = ModrinthClient::new()?;
     let game_version = "1.21.1";

@@ -14,7 +14,10 @@ pub struct Session {
     pub saved_at: String,
 }
 
-pub const SESSION_DIR: &str = "sessions";
+/// 会话目录: 用户数据根目录 (config.data_dir, 即 db 文件所在目录) 下的 sessions/
+pub fn sessions_dir(data_dir: &str) -> String {
+    format!("{data_dir}/sessions")
+}
 
 /// 会话文件列表条目, valid 表示能通过 Session 反序列化校验 (合法可导入)
 pub struct SessionInfo {
@@ -33,9 +36,11 @@ fn write_to(agent: &Agent, path: &str) -> Result<()> {
         calls: agent.calls,
         saved_at: chrono::Local::now().to_rfc3339(),
     };
-    std::fs::create_dir_all(SESSION_DIR)?;
-    let text = serde_json::to_string_pretty(&session)?;
     let target = std::path::Path::new(path);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(&session)?;
     let temp = target.with_extension(format!("tmp-{}", std::process::id()));
     std::fs::write(&temp, text)?;
     if let Err(err) = std::fs::rename(&temp, target) {
@@ -50,22 +55,22 @@ fn write_to(agent: &Agent, path: &str) -> Result<()> {
 }
 
 /// 手动另存: 每次生成一个带时间戳的新快照文件
-pub fn save(agent: &Agent) -> Result<String> {
+pub fn save(agent: &Agent, data_dir: &str) -> Result<String> {
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let path = format!("{SESSION_DIR}/session-{ts}.json");
+    let path = format!("{}/session-{ts}.json", sessions_dir(data_dir));
     write_to(agent, &path)?;
     Ok(path)
 }
 
 /// 每轮对话结束后自动保存: 同一会话固定写同一个 auto-{ts}.json (ts = 首轮时间),
 /// 文件随对话推进持续覆盖更新; 尚无用户消息时跳过。返回空串表示无可保存内容。
-pub fn auto_save(agent: &mut Agent) -> Result<String> {
+pub fn auto_save(agent: &mut Agent, data_dir: &str) -> Result<String> {
     if !agent.messages.iter().any(|m| m.role == "user") {
         return Ok(String::new());
     }
     if agent.session_file.is_none() {
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        agent.session_file = Some(format!("{SESSION_DIR}/auto-{ts}.json"));
+        agent.session_file = Some(format!("{}/auto-{ts}.json", sessions_dir(data_dir)));
     }
     let path = agent
         .session_file
@@ -75,8 +80,8 @@ pub fn auto_save(agent: &mut Agent) -> Result<String> {
     Ok(path)
 }
 
-pub fn load_latest(agent: &mut Agent) -> Result<String> {
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(SESSION_DIR)?
+pub fn load_latest(agent: &mut Agent, data_dir: &str) -> Result<String> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(sessions_dir(data_dir))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
@@ -103,9 +108,9 @@ pub fn load_path(agent: &mut Agent, path: &str) -> Result<String> {
 }
 
 /// 列出会话目录下的 .json 文件并逐个校验合法性
-pub fn list() -> Vec<SessionInfo> {
+pub fn list(data_dir: &str) -> Vec<SessionInfo> {
     let mut out: Vec<SessionInfo> = Vec::new();
-    let Ok(entries) = std::fs::read_dir(SESSION_DIR) else {
+    let Ok(entries) = std::fs::read_dir(sessions_dir(data_dir)) else {
         return out;
     };
     for entry in entries.flatten() {

@@ -106,6 +106,67 @@ struct ChatRequest<'a> {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    /// config.thinking 透传的扩展字段 (enable_thinking / reasoning_effort 等)
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// 把 thinking 配置解析为请求体扩展字段: auto/空段跳过; k=v 的值尽力转
+/// JSON (布尔/数字/对象), 失败则按字符串。provider 各家参数名不同, 故原样透传。
+fn parse_thinking(spec: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for seg in split_thinking_entries(spec) {
+        let seg = seg.trim();
+        if seg.is_empty() || seg.eq_ignore_ascii_case("auto") {
+            continue;
+        }
+        if let Some((k, v)) = seg.split_once('=') {
+            let (k, v) = (k.trim(), v.trim());
+            if k.is_empty() {
+                continue;
+            }
+            let val = serde_json::from_str(v)
+                .unwrap_or_else(|_| serde_json::Value::String(v.to_string()));
+            map.insert(k.to_string(), val);
+        }
+    }
+    map
+}
+
+/// 按顶层逗号切分, 跳过引号内与 {}/[] 嵌套中的逗号 (JSON 对象值里会有逗号)
+fn split_thinking_entries(spec: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+    for ch in spec.chars() {
+        if esc {
+            esc = false;
+            cur.push(ch);
+            continue;
+        }
+        match ch {
+            '\\' if in_str => {
+                esc = true;
+                cur.push(ch);
+            }
+            '"' => {
+                in_str = !in_str;
+                cur.push(ch);
+            }
+            '{' | '[' if !in_str => {
+                depth += 1;
+                cur.push(ch);
+            }
+            '}' | ']' if !in_str => {
+                depth = depth.saturating_sub(1);
+                cur.push(ch);
+            }
+            ',' if !in_str && depth == 0 => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    out.push(cur);
+    out
 }
 
 #[derive(Serialize)]
@@ -161,6 +222,12 @@ impl LlmClient {
         mut on_delta: impl FnMut(&str),
     ) -> Result<ChatResult> {
         let tool_choice = tools.as_ref().map(|_| "auto".to_string());
+        let extra = self
+            .cfg
+            .thinking
+            .as_deref()
+            .map(parse_thinking)
+            .unwrap_or_default();
         let req = ChatRequest {
             model: &self.cfg.model,
             messages,
@@ -170,6 +237,7 @@ impl LlmClient {
             stream_options: Some(StreamOptions {
                 include_usage: true,
             }),
+            extra,
         };
         let mut call = self
             .http
@@ -334,5 +402,25 @@ mod tests {
         upsert(&mut parts, 1, "updated".into());
         upsert(&mut parts, 0, "first".into());
         assert_eq!(parts, vec![(1, "updated".into()), (0, "first".into())]);
+    }
+
+    #[test]
+    fn thinking_spec_parses_into_request_extras() {
+        let m = parse_thinking("enable_thinking=false, reasoning_effort=medium");
+        assert_eq!(m.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            m.get("reasoning_effort"),
+            Some(&serde_json::json!("medium"))
+        );
+
+        let obj = parse_thinking(r#"thinking={"type":"enabled","budget_tokens":4096}"#);
+        assert_eq!(
+            obj.get("thinking").and_then(|v| v.get("budget_tokens")),
+            Some(&serde_json::json!(4096))
+        );
+
+        assert!(parse_thinking("auto").is_empty());
+        assert!(parse_thinking("").is_empty());
+        assert_eq!(parse_thinking("  , broken , x=1").len(), 1);
     }
 }

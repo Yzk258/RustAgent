@@ -101,14 +101,14 @@ async fn main() -> Result<()> {
             }
             "/save" => {
                 let ag = agent.lock().await;
-                match history::save(&ag) {
+                match history::save(&ag, &cfg.data_dir()) {
                     Ok(p) => println!("{} {}", paint(GREEN, "✓ 已保存"), paint(DIM, &p)),
                     Err(e) => eprintln!("{}", paint(RED, &format!("✗ {e:#}"))),
                 }
             }
             "/load" => {
                 let mut ag = agent.lock().await;
-                match history::load_latest(&mut ag) {
+                match history::load_latest(&mut ag, &cfg.data_dir()) {
                     Ok(p) => println!("{} {}", paint(GREEN, "✓ 已加载"), paint(DIM, &p)),
                     Err(e) => eprintln!("{}", paint(RED, &format!("✗ {e:#}"))),
                 }
@@ -233,7 +233,7 @@ async fn main() -> Result<()> {
                 // 每轮对话默认自动保存 (打断/出错也保留已有内容), 同一会话覆盖写同一文件
                 {
                     let mut ag = agent.lock().await;
-                    match history::auto_save(&mut ag) {
+                    match history::auto_save(&mut ag, &cfg.data_dir()) {
                         Ok(p) if !p.is_empty() => {
                             println!("{}", paint(DIM, &format!("  ✓ 已自动保存 {p}")))
                         }

@@ -190,6 +190,7 @@ fn apply_preset(
 pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Response {
     let (out_tx, out_rx) = unbounded_channel::<Result<Bytes, Infallible>>();
     let agent = state.agent.clone();
+    let data_dir = state.cfg.data_dir();
     let text = apply_preset(req.text, &req.game_version, &req.loader, &req.search_limit);
 
     tokio::spawn(async move {
@@ -238,7 +239,7 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
                 err_msg = Some(format!("{e:#}"));
             }
             // 每轮对话默认自动保存 (打断/出错也保留已有内容), 同一会话覆盖写同一文件
-            saved_path = history::auto_save(&mut ag).unwrap_or_default();
+            saved_path = history::auto_save(&mut ag, &data_dir).unwrap_or_default();
         }
         // 关闭事件通道, 等转发任务把剩余事件写完
         drop(ev_tx);
@@ -294,7 +295,7 @@ pub async fn chat_interrupt(State(state): SharedState) -> Json<Value> {
 /// 保存当前会话到 sessions/
 pub async fn session_save(State(state): SharedState) -> Json<Value> {
     let ag = state.agent.lock().await;
-    match history::save(&ag) {
+    match history::save(&ag, &state.cfg.data_dir()) {
         Ok(p) => Json(json!({ "ok": true, "message": format!("已保存: {p}") })),
         Err(e) => Json(json!({ "ok": false, "message": format!("{e:#}") })),
     }
@@ -303,7 +304,7 @@ pub async fn session_save(State(state): SharedState) -> Json<Value> {
 /// 加载最近一次保存的会话 (响应附带可渲染消息, 前端据此恢复对话显示)
 pub async fn session_load(State(state): SharedState) -> Json<Value> {
     let mut ag = state.agent.lock().await;
-    match history::load_latest(&mut ag) {
+    match history::load_latest(&mut ag, &state.cfg.data_dir()) {
         Ok(p) => Json(json!({
             "ok": true,
             "message": format!("已加载: {p}"),
@@ -313,9 +314,9 @@ pub async fn session_load(State(state): SharedState) -> Json<Value> {
     }
 }
 
-/// 列出 sessions/ 下的会话文件, valid 为 true 的才可导入
-pub async fn sessions() -> Json<Value> {
-    let list: Vec<Value> = history::list()
+/// 列出会话目录下的会话文件, valid 为 true 的才可导入
+pub async fn sessions(State(state): SharedState) -> Json<Value> {
+    let list: Vec<Value> = history::list(&state.cfg.data_dir())
         .into_iter()
         .map(|s| {
             json!({
@@ -326,7 +327,10 @@ pub async fn sessions() -> Json<Value> {
             })
         })
         .collect();
-    Json(json!({ "dir": history::SESSION_DIR, "sessions": list }))
+    Json(json!({
+        "dir": history::sessions_dir(&state.cfg.data_dir()),
+        "sessions": list
+    }))
 }
 
 #[derive(Deserialize)]
@@ -342,7 +346,11 @@ pub async fn session_import(
     if req.name.contains('/') || req.name.contains('\\') || req.name.contains("..") {
         return Json(json!({ "ok": false, "message": "非法文件名" }));
     }
-    let path = format!("{}/{}", history::SESSION_DIR, req.name);
+    let path = format!(
+        "{}/{}",
+        history::sessions_dir(&state.cfg.data_dir()),
+        req.name
+    );
     let mut ag = state.agent.lock().await;
     match history::load_path(&mut ag, &path) {
         Ok(p) => Json(json!({
@@ -355,11 +363,12 @@ pub async fn session_import(
 }
 
 /// 在系统文件管理器中打开会话目录 (用户可手动放入合法的 session json 实现导入)
-pub async fn session_open() -> Json<Value> {
-    if let Err(e) = std::fs::create_dir_all(history::SESSION_DIR) {
+pub async fn session_open(State(state): SharedState) -> Json<Value> {
+    let dir = history::sessions_dir(&state.cfg.data_dir());
+    if let Err(e) = std::fs::create_dir_all(&dir) {
         return Json(json!({ "ok": false, "message": format!("无法创建目录: {e:#}") }));
     }
-    let abs = std::path::absolute(history::SESSION_DIR).unwrap_or_default();
+    let abs = std::path::absolute(&dir).unwrap_or_default();
     match open_in_file_manager(&abs.to_string_lossy()) {
         Ok(_) => Json(json!({ "ok": true, "message": format!("已打开目录: {}", abs.display()) })),
         Err(e) => Json(json!({ "ok": false, "message": format!("打开目录失败: {e:#}") })),
