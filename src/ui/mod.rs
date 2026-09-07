@@ -7,16 +7,15 @@
 
 pub mod api;
 
-use anyhow::Result;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::agent::{new_agent, Agent};
 use crate::config::Config;
+use crate::prelude::*;
 
 /// 共享应用状态: Agent 加互斥锁串行化对话, 配置 RwLock 支持运行时热更新
 /// (设置窗口改模型等)。interrupt 是协作式打断标记 (打断按钮置位, agent 在安全点检查),

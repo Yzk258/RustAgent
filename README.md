@@ -174,7 +174,8 @@ agent 通过函数调用（tool calling）驱动以下工具，所有 mod 数据
 
 ```
 src/
-├── main.rs       # 入口: 交互式 CLI、子命令分发
+├── lib.rs        # 库入口: 模块组织 + prelude (anyhow/serde/Arc 等高频导入集中)
+├── main.rs       # 二进制入口: 交互式 CLI、子命令分发
 ├── cli.rs        # CLI 视觉样式: 圆角横幅、ANSI 配色、CJK 宽度对齐、进度条
 ├── agent.rs      # Agent 主循环: LLM 对话、工具调度、上下文裁剪、预算控制、打断与进展反馈
 ├── llm.rs        # OpenAI 兼容 LLM 客户端 (含 tool calling 与流式输出)
@@ -183,7 +184,7 @@ src/
 ├── pipeline.rs   # 纯逻辑管线: 排序、口味标签、依赖闭包 (可脱离 LLM 演示)
 ├── database.rs   # 用户口味数据库 (SQLite)
 ├── history.rs    # 会话保存/加载 (含每轮自动保存)
-├── config.rs     # config.toml 解析与启动校验
+├── config.rs     # config.toml 解析、启动校验与设置写回
 └── ui/           # Web 界面: axum 服务器 + REST/流式 API + 内嵌前端三件套
 
 userdata/          # 运行时用户数据 (首次运行自动创建)

@@ -1,22 +1,14 @@
-mod agent;
-mod cli;
-mod config;
-mod database;
-mod history;
-mod llm;
-mod modrinth;
-mod pipeline;
-mod tools;
-mod ui;
-
-use agent::new_agent;
-use anyhow::{bail, Result};
-use cli::{paint, ACCENT, DIM, GREEN, RED, YELLOW};
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tools::ToolRegistry;
+use rustagent::prelude::*;
+use rustagent::{
+    agent::new_agent,
+    cli::{self, paint, ACCENT, DIM, GREEN, RED, YELLOW},
+    config, database, history, modrinth, pipeline,
+    tools::{self, ToolRegistry},
+    ui,
+};
 
 use std::io::Read as _;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[tokio::main]
 async fn main() -> Result<()> {

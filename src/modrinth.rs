@@ -1,5 +1,4 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use crate::prelude::*;
 
 const API_BASE: &str = "https://api.modrinth.com/v2";
 const USER_AGENT: &str = "RustAgent/0.1 (tsinghua rust course project)";

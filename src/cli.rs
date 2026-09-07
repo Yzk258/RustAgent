@@ -104,13 +104,14 @@ pub fn print_busy_hint() {
 /// 长任务实时进展渲染: 数值进度画 ▰▱ 条, 同一行原地刷新 (\r + 清行)。
 /// 零依赖 ANSI 而非 indicatif: REPL Ctrl+C 直接 abort 打印任务, 自绘行只是
 /// 停在原地不会残留刷新; 三方库的全局 draw target 在该场景下会持续抢占 stdout。
+#[derive(Default)]
 pub struct ProgressPrinter {
     active: bool,
 }
 
 impl ProgressPrinter {
     pub fn new() -> Self {
-        Self { active: false }
+        Self::default()
     }
 
     fn clear(&mut self) {

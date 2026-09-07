@@ -16,6 +16,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use super::AppState;
 use crate::agent::{new_agent, AgentEvent};
 use crate::history;
+use crate::prelude::*;
 
 /// 所有 handler 共享的状态提取器类型
 type SharedState = State<std::sync::Arc<AppState>>;
