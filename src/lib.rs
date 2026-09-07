@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod cli;
 pub mod config;
+pub mod curseforge;
 pub mod database;
 pub mod history;
 pub mod llm;
@@ -11,7 +12,6 @@ pub mod modrinth;
 pub mod pipeline;
 pub mod tools;
 pub mod ui;
-
 
 /// 只收跨模块反复出现的 (anyhow / serde / json / Arc / atomic), 过度膨胀反而难查。
 pub mod prelude {

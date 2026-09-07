@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     }
     if args.len() > 2 && args[1] == "repair" {
         let modrinth = modrinth::ModrinthClient::new()?;
-        let registry = ToolRegistry::new(modrinth, &cfg.output.download_dir, cfg.db_path());
+        let registry = ToolRegistry::new(modrinth, None, &cfg.output.download_dir, cfg.db_path());
         let result = registry
             .execute("repair_pack", &args[2..].join(" "), &tools::TaskCtx::none())
             .await?;
@@ -37,13 +37,7 @@ async fn main() -> Result<()> {
 
     let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let agent = Arc::new(tokio::sync::Mutex::new(
-        new_agent(
-            &cfg.llm,
-            &cfg.output.download_dir,
-            &cfg.db_path(),
-            interrupt,
-        )
-        .await?,
+        new_agent(&cfg, interrupt.clone()).await?,
     ));
     let mut reader = BufReader::new(tokio::io::stdin());
 
@@ -81,14 +75,8 @@ async fn main() -> Result<()> {
             "" => continue,
             "/quit" | "/exit" => break,
             "/new" => {
-                let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                *agent.lock().await = new_agent(
-                    &cfg.llm,
-                    &cfg.output.download_dir,
-                    &cfg.db_path(),
-                    interrupt,
-                )
-                .await?;
+                *agent.lock().await =
+                    new_agent(&cfg, Arc::new(std::sync::atomic::AtomicBool::new(false))).await?;
                 println!("{}", paint(GREEN, "✓ 已开启新会话"));
             }
             "/save" => {
@@ -266,7 +254,7 @@ async fn selftest(cfg: &config::Config) -> Result<()> {
     }
 
     println!("[2/3] 加载器版本获取测试 (forge / neoforge / quilt, MC 1.21.1)");
-    let registry = ToolRegistry::new(mr, &cfg.output.download_dir, cfg.db_path());
+    let registry = ToolRegistry::new(mr, None, &cfg.output.download_dir, cfg.db_path());
     for (name, gv) in [
         ("forge", "1.21.1"),
         ("neoforge", "1.21.1"),

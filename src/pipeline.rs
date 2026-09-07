@@ -393,6 +393,9 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
 
     let registry = ToolRegistry::new(
         ModrinthClient::new()?,
+        cfg.curseforge
+            .enabled
+            .then(crate::curseforge::CfClient::new),
         &cfg.output.download_dir,
         cfg.db_path(),
     );

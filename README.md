@@ -15,7 +15,8 @@
 3. **"试试这个"**：根据你的口味画像，从 Modrinth 最新/热门 mod 中挑出你没评价过的新 mod；Web 界面侧栏有专属卡片，带 👍/👎 按钮直接写库，且与对话并行互不阻塞。
 4. **版本过滤与冲突检测**：按游戏版本、加载器自动过滤不兼容 mod；组包支持 fabric / forge / neoforge / quilt 四种加载器（各加载器最新稳定版从官方元数据实时获取并写入整合包依赖声明）；组包时检测冲突风险并汇报。
 5. **整合包修复**：把启动器报错（如"缺少 xxx 依赖"）贴给它，agent 自动找到缺失 mod 并补进原整合包，重新拖入启动器即可。
-6. **灵活的 LLM 接入**：任何 OpenAI 兼容 API（DeepSeek、OpenAI 等）或本地部署模型（如 Ollama）均可，只需改配置文件；支持透传思考模式参数（如 `reasoning_effort`、`enable_thinking`）。
+6. **CurseForge 独占 mod（实验性，默认关闭）**：在 `config.toml` 中加入 `[curseforge]` 并设置 `enabled = true` 即可开启；开启后部分 CurseForge 独占的经典 mod 也能点名加入整合包。
+7. **灵活的 LLM 接入**：任何 OpenAI 兼容 API（DeepSeek、OpenAI 等）或本地部署模型（如 Ollama）均可，只需改配置文件；支持透传思考模式参数（如 `reasoning_effort`、`enable_thinking`）。
 
 ## 快速开始
 

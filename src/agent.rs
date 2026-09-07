@@ -43,6 +43,7 @@ const SYSTEM_PROMPT: &str = "你是 Minecraft 模组管理助手 RustAgent。核
 5. 用户表达喜欢/不喜欢时调用 record_feedback 记录; 用户想看点新的时调用 recommend_new_mods。
 6. 搜索无结果时换个关键词重试, 而不是放弃。
 7. 用户贴出启动器报错(如缺少某依赖、mod 不兼容)时: 从报错中提取缺失 mod 的名称, 用 search_mods 找到 slug, 调用 repair_pack 把它补进原整合包, 并告知用户重新拖入启动器安装。
+8. CurseForge 独占 mod: Modrinth 搜索无结果时 search_mods 会自动尝试 CurseForge 点名查询(需服务器开启 curseforge 支持), CF 候选带 source 为 curseforge 的标记, 组包时放入 build_modpack 的 cf_mods 参数(不是 mod_slugs)。未开启时告知用户可在 config.toml 的 [curseforge] 打开。OptiFine 等不提供任何接口的 mod 只能引导用户去官网手动下载。
 始终用中文回复。同一轮内工具调用失败要向用户说明原因并给出替代方案。";
 
 pub struct Agent {
@@ -60,16 +61,15 @@ pub struct Agent {
 
 /// 组装一个全新的 Agent (CLI 与 Web UI 共用的构造入口)。
 /// 新增底层客户端时在这里统一接线。interrupt 由调用方持有 (UI 换 agent 时复用同一标记)。
-pub async fn new_agent(
-    cfg: &LlmConfig,
-    download_dir: &str,
-    db_path: &str,
-    interrupt: Arc<AtomicBool>,
-) -> Result<Agent> {
-    let llm = LlmClient::new(cfg.clone())?;
+pub async fn new_agent(cfg: &crate::config::Config, interrupt: Arc<AtomicBool>) -> Result<Agent> {
+    let llm = LlmClient::new(cfg.llm.clone())?;
     let modrinth = crate::modrinth::ModrinthClient::new()?;
-    let registry = ToolRegistry::new(modrinth, download_dir, db_path);
-    Ok(Agent::new(llm, registry, cfg.clone(), interrupt))
+    let cf = cfg
+        .curseforge
+        .enabled
+        .then(crate::curseforge::CfClient::new);
+    let registry = ToolRegistry::new(modrinth, cf, &cfg.output.download_dir, cfg.db_path());
+    Ok(Agent::new(llm, registry, cfg.llm.clone(), interrupt))
 }
 
 impl Agent {
@@ -101,6 +101,12 @@ impl Agent {
         self.llm = LlmClient::new(cfg.clone())?;
         self.llm_cfg = cfg;
         Ok(())
+    }
+
+    /// 设置窗口热切换 CurseForge 支持: 会话历史保留, 下一轮对话即生效
+    pub fn update_curseforge(&mut self, enabled: bool) {
+        self.tools
+            .set_cf(enabled.then(crate::curseforge::CfClient::new));
     }
 
     /// CLI 入口: 与旧版行为一致, 在终端打印工具调用与最终回复。

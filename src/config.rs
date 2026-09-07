@@ -8,6 +8,8 @@ pub struct Config {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub curseforge: CurseforgeConfig,
 }
 
 #[derive(Deserialize, Clone)]
@@ -55,6 +57,13 @@ pub struct DatabaseConfig {
 pub struct UiConfig {
     #[serde(default = "default_ui_port")]
     pub port: u16,
+}
+
+/// CurseForge 独占 mod 支持 (阶段一实验性, 默认关闭): 点名查询 + 直链组包, 无需 API key
+#[derive(Deserialize, Clone, Default)]
+pub struct CurseforgeConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Default for UiConfig {
@@ -125,7 +134,6 @@ pub fn load(path: &str) -> anyhow::Result<Config> {
     cfg.validate().context("配置校验失败")?;
     Ok(cfg)
 }
-
 /// 写入键值并保留旧值的行内注释 (toml_edit 直接赋新值会丢掉原 decor)
 fn set_keep_decor(table: &mut toml_edit::Table, key: &str, v: toml_edit::Value) {
     let mut item = toml_edit::Item::Value(v);
@@ -138,38 +146,60 @@ fn set_keep_decor(table: &mut toml_edit::Table, key: &str, v: toml_edit::Value) 
     table.insert(key, item);
 }
 
-/// 把 [llm] 段写回 config.toml (设置窗口保存时调用)。
-/// 用 toml_edit 做文档级编辑, 保留用户文件里的注释与排版。
-/// thinking 为 None 时删除该键 (回到不发送任何参数的默认行为)。
-pub fn save_llm(path: &str, llm: &LlmConfig) -> anyhow::Result<()> {
+/// 文档级编辑 config.toml (读 → 改 → 写回, 保留注释与排版), 供各配置段写回复用
+fn edit_config_doc(
+    path: &str,
+    f: impl FnOnce(&mut toml_edit::DocumentMut) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let text = std::fs::read_to_string(path).with_context(|| format!("读取 {path} 失败"))?;
     let mut doc = text
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("{path} 不是合法 TOML, 无法写回设置"))?;
-    let item = doc["llm"].or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let Some(table) = item.as_table_mut() else {
-        bail!("[llm] 段不是 TOML 表, 无法写回设置");
-    };
-    set_keep_decor(table, "base_url", llm.base_url.clone().into());
-    set_keep_decor(table, "api_key", llm.api_key.clone().into());
-    set_keep_decor(table, "model", llm.model.clone().into());
-    set_keep_decor(table, "context_length", (llm.context_length as i64).into());
-    set_keep_decor(table, "price_input_per_m", llm.price_input_per_m.into());
-    set_keep_decor(table, "price_output_per_m", llm.price_output_per_m.into());
-    set_keep_decor(table, "token_budget", (llm.token_budget as i64).into());
-    set_keep_decor(
-        table,
-        "max_tool_iterations",
-        (llm.max_tool_iterations as i64).into(),
-    );
-    match &llm.thinking {
-        Some(s) => set_keep_decor(table, "thinking", s.clone().into()),
-        None => {
-            table.remove("thinking");
-        }
-    }
+    f(&mut doc)?;
     std::fs::write(path, doc.to_string()).with_context(|| format!("写入 {path} 失败"))?;
     Ok(())
+}
+
+/// 把 [llm] 段写回 config.toml (设置窗口保存时调用)。
+/// thinking 为 None 时删除该键 (回到不发送任何参数的默认行为)。
+pub fn save_llm(path: &str, llm: &LlmConfig) -> anyhow::Result<()> {
+    edit_config_doc(path, |doc| {
+        let item = doc["llm"].or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(table) = item.as_table_mut() else {
+            bail!("[llm] 段不是 TOML 表, 无法写回设置");
+        };
+        set_keep_decor(table, "base_url", llm.base_url.clone().into());
+        set_keep_decor(table, "api_key", llm.api_key.clone().into());
+        set_keep_decor(table, "model", llm.model.clone().into());
+        set_keep_decor(table, "context_length", (llm.context_length as i64).into());
+        set_keep_decor(table, "price_input_per_m", llm.price_input_per_m.into());
+        set_keep_decor(table, "price_output_per_m", llm.price_output_per_m.into());
+        set_keep_decor(table, "token_budget", (llm.token_budget as i64).into());
+        set_keep_decor(
+            table,
+            "max_tool_iterations",
+            (llm.max_tool_iterations as i64).into(),
+        );
+        match &llm.thinking {
+            Some(s) => set_keep_decor(table, "thinking", s.clone().into()),
+            None => {
+                table.remove("thinking");
+            }
+        }
+        Ok(())
+    })
+}
+
+/// 把 [curseforge] enabled 写回 config.toml (设置窗口切换开关时调用)
+pub fn save_curseforge(path: &str, enabled: bool) -> anyhow::Result<()> {
+    edit_config_doc(path, |doc| {
+        let item = doc["curseforge"].or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(table) = item.as_table_mut() else {
+            bail!("[curseforge] 段不是 TOML 表, 无法写回设置");
+        };
+        set_keep_decor(table, "enabled", enabled.into());
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -216,6 +246,38 @@ mod tests {
         let reloaded = std::fs::read_to_string(&path).unwrap();
         let cfg3: Config = toml::from_str(&reloaded).unwrap();
         assert!(cfg3.llm.thinking.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn curseforge_defaults_off_and_parses_on() {
+        let base = "[llm]\nbase_url=\"http://x/v1\"\napi_key=\"k\"\nmodel=\"m\"\n[output]\ndownload_dir=\"./dl\"\n";
+        let cfg: Config = toml::from_str(base).unwrap();
+        assert!(!cfg.curseforge.enabled, "缺省时必须关闭");
+        let cfg: Config = toml::from_str(&format!("{base}[curseforge]\nenabled = true\n")).unwrap();
+        assert!(cfg.curseforge.enabled);
+    }
+
+    #[test]
+    fn save_curseforge_writes_section_and_keeps_comments() {
+        let dir = std::env::temp_dir().join(format!("rustagent-cfcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# 顶部注释\n[llm]\nbase_url = \"http://x/v1\"\napi_key = \"k\"\nmodel = \"m\"\n[output]\ndownload_dir = \"./dl\"\n",
+        )
+        .unwrap();
+        save_curseforge(path.to_str().unwrap(), true).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# 顶部注释"));
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert!(cfg.curseforge.enabled, "写入后应可解析为开启");
+        // 再关掉, 同样生效
+        save_curseforge(path.to_str().unwrap(), false).unwrap();
+        let reloaded = std::fs::read_to_string(&path).unwrap();
+        let cfg: Config = toml::from_str(&reloaded).unwrap();
+        assert!(!cfg.curseforge.enabled);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

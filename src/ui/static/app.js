@@ -564,6 +564,7 @@ async function openSettings() {
     $("set-price-in").value = s.price_input_per_m;
     $("set-price-out").value = s.price_output_per_m;
     $("set-thinking").value = s.thinking || "";
+    $("set-cf").checked = !!s.curseforge_enabled;
   } catch {
     toast("读取设置失败", true);
   }
@@ -588,6 +589,7 @@ async function saveSettings(e) {
     price_input_per_m: parseFloat($("set-price-in").value),
     price_output_per_m: parseFloat($("set-price-out").value),
     thinking: $("set-thinking").value.trim(),
+    curseforge_enabled: $("set-cf").checked,
   };
   const key = $("set-api-key").value.trim();
   if (key) body.api_key = key;

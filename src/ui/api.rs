@@ -368,14 +368,7 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
 /// 开启新会话: 重建一个全新 Agent (复用同一打断标记实例, 使用当前生效配置)
 pub async fn session_new(State(state): SharedState) -> Json<Value> {
     let cfg = state.cfg.read().await.clone();
-    match new_agent(
-        &cfg.llm,
-        &cfg.output.download_dir,
-        &cfg.db_path(),
-        state.interrupt.clone(),
-    )
-    .await
-    {
+    match new_agent(&cfg, state.interrupt.clone()).await {
         Ok(a) => {
             *state.agent.lock().await = a;
             Json(json!({ "ok": true, "message": "已开启新会话" }))
@@ -505,6 +498,7 @@ pub async fn settings(State(state): SharedState) -> Json<Value> {
         "token_budget": cfg.llm.token_budget,
         "max_tool_iterations": cfg.llm.max_tool_iterations,
         "thinking": cfg.llm.thinking.clone().unwrap_or_default(),
+        "curseforge_enabled": cfg.curseforge.enabled,
     }))
 }
 
@@ -521,6 +515,8 @@ pub struct SettingsRequest {
     max_tool_iterations: Option<u32>,
     /// 空串 = 清除 (不再发送任何思考参数); 其余原样透传
     thinking: Option<String>,
+    /// CurseForge 支持开关 (设置窗口切换; 开→热装客户端, 关→热卸)
+    curseforge_enabled: Option<bool>,
 }
 
 /// 保存设置: 在配置副本上套用改动 -> 校验 -> 热更新当前 agent (会话保留)
@@ -577,13 +573,26 @@ pub async fn settings_update(
         if let Err(e) = ag.update_llm(llm.clone()) {
             return Json(json!({ "ok": false, "message": format!("设置未保存: {e:#}") }));
         }
+        if let Some(v) = req.curseforge_enabled {
+            ag.update_curseforge(v);
+        }
     }
 
     // 写回 config.toml; 失败不影响本次已生效的运行时配置
-    let message = match crate::config::save_llm(&state.config_path, &cfg.llm) {
+    let mut message = match crate::config::save_llm(&state.config_path, &cfg.llm) {
         Ok(()) => format!("已保存, 当前模型: {}", llm.model),
         Err(e) => format!("运行时已生效, 但写入 config.toml 失败: {e:#}"),
     };
+    if let Some(v) = req.curseforge_enabled {
+        message.push_str(if v {
+            "; CurseForge 已开启"
+        } else {
+            "; CurseForge 已关闭"
+        });
+        if let Err(e) = crate::config::save_curseforge(&state.config_path, v) {
+            message.push_str(&format!(" (写回失败: {e:#})"));
+        }
+    }
     *state.cfg.write().await = cfg;
     Json(json!({ "ok": true, "message": message, "model": llm.model }))
 }

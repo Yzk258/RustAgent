@@ -684,6 +684,42 @@ button:hover { border-color: rgba(109, 141, 255, 0.55); color: var(--accent-brig
 }
 .field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .field-hint { font-size: 11px; color: var(--text-dim); opacity: 0.8; }
+
+/* 开关行 (CurseForge 支持等布尔设置) */
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  cursor: pointer;
+  border-top: 1px solid var(--border-soft);
+  margin-top: 2px;
+  padding-top: 14px;
+}
+.switch-input { position: absolute; opacity: 0; }
+.switch {
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  position: relative;
+  transition: background 0.2s ease;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #cdd3de;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+.switch-input:checked + .switch { background: var(--accent); }
+.switch-input:checked + .switch::after { transform: translateX(16px); background: #fff; }
+.switch-input:focus-visible + .switch { box-shadow: 0 0 0 3px var(--accent-soft); }
+.switch-text { font-size: 13px; color: var(--text); display: flex; flex-direction: column; gap: 2px; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
 .modal-foot { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 4px; }
 .modal-foot .field-hint { margin-right: auto; }

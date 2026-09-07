@@ -1,7 +1,7 @@
 use crate::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read as _, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::llm::ToolDef;
 use crate::modrinth::ModrinthClient;
@@ -70,6 +70,8 @@ const MAX_USER_MODS_PER_PACK: usize = 100;
 
 pub struct ToolRegistry {
     modrinth: ModrinthClient,
+    /// CurseForge 点名客户端 (config.toml [curseforge] enabled 开启时才有)
+    cf: Option<crate::curseforge::CfClient>,
     download_dir: PathBuf,
     db_path: String,
 }
@@ -90,7 +92,11 @@ struct BuildArgs {
     name: String,
     game_version: String,
     loader: String,
+    #[serde(default)]
     mod_slugs: Vec<String>,
+    /// CurseForge 独占 mod 的 slug (search_mods 回退查询返回的 source:"curseforge" 候选)
+    #[serde(default)]
+    cf_mods: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -130,21 +136,37 @@ struct Env {
 impl ToolRegistry {
     pub fn new(
         modrinth: ModrinthClient,
+        cf: Option<crate::curseforge::CfClient>,
         download_dir: impl Into<PathBuf>,
         db_path: impl Into<String>,
     ) -> Self {
         Self {
             modrinth,
+            cf,
             download_dir: download_dir.into(),
             db_path: db_path.into(),
         }
+    }
+
+    /// CF jar 缓存目录 (用户数据根目录下 cf-cache/, 与 db_path 同级)
+    fn cf_cache_dir(&self) -> PathBuf {
+        Path::new(&self.db_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.join("cf-cache"))
+            .unwrap_or_else(|| PathBuf::from("cf-cache"))
+    }
+
+    /// 设置窗口热切换 CurseForge 支持 (开→装客户端, 关→卸下)
+    pub fn set_cf(&mut self, cf: Option<crate::curseforge::CfClient>) {
+        self.cf = cf;
     }
 
     pub fn defs() -> Vec<ToolDef> {
         vec![
             ToolDef::function(
                 "search_mods",
-                "在 Modrinth 上搜索 Minecraft mod。返回真实存在的 mod 列表及描述, 供用户筛选。永远不要凭记忆推荐 mod, 必须调用本工具。",
+                "在 Modrinth 上搜索 Minecraft mod。返回真实存在的 mod 列表及描述, 供用户筛选。Modrinth 无结果且服务器开启 CurseForge 支持时, 会自动用查询词点名尝试 CurseForge (返回的 CF 候选带 source:curseforge 标记)。永远不要凭记忆推荐 mod, 必须调用本工具。",
                 json!({
                     "type": "object",
                     "properties": {
@@ -165,9 +187,10 @@ impl ToolRegistry {
                         "name": { "type": "string", "description": "整合包名称, 将作为输出文件名" },
                         "game_version": { "type": "string", "description": "Minecraft 版本" },
                         "loader": { "type": "string", "description": "mod 加载器: fabric / forge / neoforge / quilt" },
-                        "mod_slugs": { "type": "array", "items": { "type": "string" }, "description": "用户确认要加入的 mod 的 slug 列表" }
+                        "mod_slugs": { "type": "array", "items": { "type": "string" }, "description": "用户确认要加入的 Modrinth mod 的 slug 列表" },
+                        "cf_mods": { "type": "array", "items": { "type": "string" }, "description": "CurseForge 独占 mod 的 slug 列表 (search_mods 返回的 source:curseforge 候选放这里, 需服务器已开启 curseforge 支持)" }
                     },
-                    "required": ["name", "game_version", "loader", "mod_slugs"]
+                    "required": ["name", "game_version", "loader"]
                 }),
             ),
             ToolDef::function(
@@ -334,7 +357,7 @@ impl ToolRegistry {
                 "relevance",
             )
             .await?;
-        let mods: Vec<serde_json::Value> = resp
+        let mut mods: Vec<serde_json::Value> = resp
             .hits
             .iter()
             .map(|h| {
@@ -350,19 +373,39 @@ impl ToolRegistry {
                 })
             })
             .collect();
+        // Modrinth 无结果且开启 CF 支持时: 用查询词拼 slug 点名试一次 CurseForge
+        // (仅 ASCII 查询有效; cfwidget 无搜索能力, 命中即视为 CF 独占候选)
+        if mods.is_empty() {
+            if let (Some(cf), true) = (&self.cf, a.query.trim().is_ascii()) {
+                let slug = crate::curseforge::slugify(&a.query);
+                if !slug.is_empty() {
+                    if let Ok(p) = cf.lookup(&slug).await {
+                        mods.push(json!({
+                            "slug": slug,
+                            "source": "curseforge",
+                            "title": p.title,
+                            "description": p.summary,
+                            "categories": p.categories,
+                            "note": "CurseForge 独占候选, 组包时用 build_modpack 的 cf_mods 参数",
+                        }));
+                    }
+                }
+            }
+        }
         Ok(json!({ "query_used": query, "total_hits": resp.total_hits, "mods": mods }))
     }
 
     async fn build_modpack(&self, args: &str, ctx: &TaskCtx) -> Result<serde_json::Value> {
         let a: BuildArgs = serde_json::from_str(args)?;
-        if a.mod_slugs.is_empty() {
+        if a.mod_slugs.is_empty() && a.cf_mods.is_empty() {
             bail!("mod 列表为空");
         }
-        // 只统计用户主动挑选的 mod; 依赖补全走 auto_added, 修复补入走 repair_pack, 均不计入
-        if a.mod_slugs.len() > MAX_USER_MODS_PER_PACK {
+        // 只统计用户主动挑选的 mod (Modrinth + CurseForge); 依赖补全走 auto_added,
+        // 修复补入走 repair_pack, 均不计入 —— 设上限是为考虑轻量化, 敬请谅解。
+        let user_count = a.mod_slugs.len() + a.cf_mods.len();
+        if user_count > MAX_USER_MODS_PER_PACK {
             bail!(
-                "所选 mod {} 个, 超出单包上限 {MAX_USER_MODS_PER_PACK} (依赖自动补全与报错修复补入不计入) —— 为考虑轻量化, 敬请谅解",
-                a.mod_slugs.len()
+                "所选 mod {user_count} 个, 超出单包上限 {MAX_USER_MODS_PER_PACK} (依赖自动补全与报错修复补入不计入) —— 为考虑轻量化, 敬请谅解"
             );
         }
         let dep_key = loader_dep_key(&a.loader)?;
@@ -378,14 +421,15 @@ impl ToolRegistry {
             None,
             None,
         );
-        let (final_slugs, auto_added, closure_conflicts) = crate::pipeline::dependency_closure(
-            &self.modrinth,
-            &a.game_version,
-            &a.loader,
-            &a.mod_slugs,
-            ctx,
-        )
-        .await?;
+        let (mut final_slugs, mut auto_added, closure_conflicts) =
+            crate::pipeline::dependency_closure(
+                &self.modrinth,
+                &a.game_version,
+                &a.loader,
+                &a.mod_slugs,
+                ctx,
+            )
+            .await?;
         ctx.report(
             format!(
                 "依赖闭包解析完成: 共 {} 个 mod (自动补充前置 {} 个)",
@@ -397,6 +441,91 @@ impl ToolRegistry {
         );
         for c in &closure_conflicts {
             conflicts.push(json!({ "issue": c }));
+        }
+
+        // CurseForge 独占 mod 收集: cfwidget 点名 → 选版 → 直链下载算双哈希 → jar 缓存。
+        // 前置声明从 jar 内 manifest 读取 (fabric.mod.json / mods.toml)。
+        let mut cf_dep_ids: Vec<String> = Vec::new();
+        if !a.cf_mods.is_empty() {
+            let Some(cf) = &self.cf else {
+                bail!("cf_mods 需要在 config.toml 的 [curseforge] 打开 enabled 后使用");
+            };
+            for (i, slug) in a.cf_mods.iter().enumerate() {
+                ctx.check_interrupt()?;
+                ctx.report(
+                    format!("解析 CF mod {slug} ({}/{})", i + 1, a.cf_mods.len()),
+                    Some((i + 1) as u64),
+                    Some(a.cf_mods.len() as u64),
+                );
+                let proj = match cf.lookup(slug).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        conflicts.push(
+                            json!({ "slug": slug, "issue": format!("cfwidget 查询失败: {e:#}") }),
+                        );
+                        continue;
+                    }
+                };
+                let file = match crate::curseforge::select_file(
+                    &proj.files,
+                    &a.game_version,
+                    &a.loader,
+                ) {
+                    Some(f) => f,
+                    None => {
+                        conflicts.push(json!({ "slug": slug, "issue": format!("CF 上没有 {} / {} 的兼容文件", a.game_version, a.loader) }));
+                        continue;
+                    }
+                };
+                let meta = match cf.fetch_file(&proj, file, &self.cf_cache_dir(), ctx).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        conflicts.push(
+                            json!({ "slug": slug, "issue": format!("CF 文件获取失败: {e:#}") }),
+                        );
+                        continue;
+                    }
+                };
+                let (client_env, server_env) = crate::curseforge::env_from_file(file);
+                total_size += meta.size;
+                summaries.push(json!({
+                    "slug": slug,
+                    "source": "curseforge",
+                    "filename": meta.filename,
+                    "size_mb": format!("{:.2}", meta.size as f64 / 1_048_576.0),
+                }));
+                files.push(IndexFile {
+                    path: format!("mods/{}", meta.filename),
+                    hashes: IndexHashes {
+                        sha1: meta.sha1.clone(),
+                        sha512: meta.sha512.clone(),
+                    },
+                    env: Env {
+                        client: client_env,
+                        server: server_env,
+                    },
+                    downloads: vec![meta.url.clone()],
+                    file_size: meta.size,
+                });
+                seen.insert(format!("cf:{slug}"));
+                cf_dep_ids.extend(meta.depends);
+            }
+            // CF manifest 声明的前置: Modrinth 有同名项目则并入收集 (fabric-api 等常见前置都在 Modrinth)
+            let mut extra: Vec<String> = Vec::new();
+            for dep in cf_dep_ids {
+                let key = format!("cf:{dep}");
+                if seen.contains(&key) || final_slugs.contains(&dep) || extra.contains(&dep) {
+                    continue;
+                }
+                seen.insert(key);
+                if self.modrinth.project(&dep).await.is_ok() {
+                    extra.push(dep);
+                } else {
+                    conflicts.push(json!({ "slug": dep, "issue": "CF mod 声明的前置在 Modrinth 无同名项目, 请提醒用户手动确认" }));
+                }
+            }
+            auto_added.extend(extra.iter().cloned());
+            final_slugs.extend(extra);
         }
 
         let total = final_slugs.len();
@@ -466,7 +595,10 @@ impl ToolRegistry {
         }
 
         if files.is_empty() {
-            bail!("没有任何 mod 能解析出兼容版本, 组包中止");
+            bail!(
+                "没有任何 mod 能解析出兼容版本, 组包中止. 详情: {}",
+                serde_json::to_string(&conflicts).unwrap_or_default()
+            );
         }
 
         ctx.report(format!("获取 {} loader 版本", a.loader), None, None);
@@ -505,11 +637,13 @@ impl ToolRegistry {
         zip.write_all(serde_json::to_string_pretty(&index)?.as_bytes())?;
         zip.finish()?;
 
-        // 记录组包到用户数据库 (失败不阻断已生成的 .mrpack; final_slugs 含用户所选+自动补全的完整闭包)
+        // 记录组包到用户数据库 (失败不阻断已生成的 .mrpack); 记录含 CF 条目 (cf: 前缀区分来源)
+        let mut record_slugs = final_slugs.clone();
+        record_slugs.extend(a.cf_mods.iter().map(|s| format!("cf:{s}")));
         let mut db = crate::database::UserDatabase::load(&self.db_path);
         db.packs.push(crate::database::PackRecord {
             name: a.name.clone(),
-            mod_slugs: final_slugs.clone(),
+            mod_slugs: record_slugs,
             created_at: chrono::Local::now().to_rfc3339(),
         });
         let db_summary = match db.save() {
@@ -838,5 +972,50 @@ mod tests {
         assert_eq!(pick_neoforge_version("1.20.1", &vs).unwrap(), "47.1.104");
         assert_eq!(pick_neoforge_version("1.19.2", &vs), None);
         assert_eq!(pick_neoforge_version("bad", &vs), None);
+    }
+
+    /// 端到端真实网络测试: CF 点名 (暮色森林) → 直链下载算哈希 → manifest 前置
+    /// → fabric-api 从 Modrinth 补全 → 混合来源 .mrpack 生成。手动运行:
+    /// `cargo test --lib cf_build_modpack_live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "真实网络: cfwidget + CF 直链下载 ~30MB"]
+    async fn cf_build_modpack_live() {
+        let dir = std::env::temp_dir().join(format!("rustagent-cfpack-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = ToolRegistry::new(
+            ModrinthClient::new().unwrap(),
+            Some(crate::curseforge::CfClient::new()),
+            dir.join("packs"),
+            dir.join("t.db").to_string_lossy().to_string(),
+        );
+        let args = r#"{"name":"cf-live","game_version":"1.21.1","loader":"fabric","mod_slugs":[],"cf_mods":["the-twilight-forest"]}"#;
+        let out = registry
+            .execute("build_modpack", args, &TaskCtx::none())
+            .await
+            .unwrap();
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        assert!(
+            out["mod_count"].as_u64().unwrap() >= 2,
+            "应含暮色森林 + 自动补全的 fabric-api, 实际: {out}"
+        );
+        let mut z = zip::ZipArchive::new(
+            std::fs::File::open(out["output_path"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let mut idx = String::new();
+        z.by_name("modrinth.index.json")
+            .unwrap()
+            .read_to_string(&mut idx)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&idx).unwrap();
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2, "混合包应恰好两个文件: {v}");
+        assert!(files
+            .iter()
+            .any(|f| f["downloads"][0].as_str().unwrap().contains("forgecdn")));
+        assert!(files
+            .iter()
+            .any(|f| f["downloads"][0].as_str().unwrap().contains("modrinth")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

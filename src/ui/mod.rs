@@ -40,13 +40,7 @@ pub async fn serve(cfg: Config, config_path: &str) -> Result<()> {
     let interrupt = Arc::new(AtomicBool::new(false));
     let port = cfg.ui.port;
     let agent = Arc::new(tokio::sync::Mutex::new(
-        new_agent(
-            &cfg.llm,
-            &cfg.output.download_dir,
-            &cfg.db_path(),
-            interrupt.clone(),
-        )
-        .await?,
+        new_agent(&cfg, interrupt.clone()).await?,
     ));
     let modrinth = crate::modrinth::ModrinthClient::new()?;
     let state = AppState {

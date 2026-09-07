@@ -17,5 +17,7 @@ toml = "0.8"
 toml_edit = "0.22"
 zip = "2"
 chrono = "0.4"
+sha1 = "0.10"
+sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rand = "0.8"

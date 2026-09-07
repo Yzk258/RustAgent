@@ -164,6 +164,13 @@
           <input id="set-thinking" autocomplete="off" spellcheck="false" placeholder="如 reasoning_effort=medium, 留空不发送">
           <span class="field-hint">key=value 格式, 逗号分隔多组; auto 或留空 = 不发送</span>
         </label>
+        <label class="switch-row">
+          <input id="set-cf" type="checkbox" class="switch-input">
+          <span class="switch" aria-hidden="true"></span>
+          <span class="switch-text">CurseForge 独占 mod 支持
+            <span class="field-hint">实验性: 开启后可点名 CurseForge 独占 mod 参与组包, 保存后立即生效</span>
+          </span>
+        </label>
         <div class="modal-foot">
           <span class="field-hint">保存后立即生效, 并写回 config.toml</span>
           <button type="button" id="btn-settings-cancel">取消</button>

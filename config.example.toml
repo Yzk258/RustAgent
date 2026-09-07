@@ -27,3 +27,7 @@ path = "./userdata/userdata.db"
 
 [ui]
 port = 1780 # Web 界面端口 (cargo run -- ui)
+
+[curseforge]
+# CurseForge 独占 mod 支持 (实验性): 开启后可点名 CurseForge 独占 mod 参与组包
+enabled = false
