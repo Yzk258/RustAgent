@@ -31,12 +31,13 @@ pub async fn health() -> Json<Value> {
 
 /// 运行信息: 模型、输出目录、当前会话用量 (不含 api_key 等敏感信息)
 pub async fn info(State(state): SharedState) -> Json<Value> {
+    let cfg = state.cfg.read().await.clone();
     let ag = state.agent.lock().await;
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "model": state.cfg.llm.model,
-        "base_url": state.cfg.llm.base_url,
-        "download_dir": state.cfg.output.download_dir,
+        "model": cfg.llm.model,
+        "base_url": cfg.llm.base_url,
+        "download_dir": cfg.output.download_dir,
         "usage_summary": ag.usage_summary(),
         "calls": ag.calls,
         "total_tokens": ag.usage.total_tokens,
@@ -58,7 +59,8 @@ pub async fn tools() -> Json<Value> {
 
 /// 用户口味数据库: 反馈统计 + 标签权重 + 历史组包记录
 pub async fn profile(State(state): SharedState) -> Json<Value> {
-    let db = crate::database::UserDatabase::load(&state.cfg.db_path());
+    let cfg = state.cfg.read().await.clone();
+    let db = crate::database::UserDatabase::load(&cfg.db_path());
     // 标签权重按绝对值从高到低排序, 只取前 12 个展示
     let mut weights: Vec<(String, f64)> = db.tag_weights().into_iter().collect();
     weights.sort_by(|a, b| {
@@ -79,7 +81,8 @@ pub async fn profile(State(state): SharedState) -> Json<Value> {
 
 /// 列出输出目录里已生成的 .mrpack 整合包文件
 pub async fn packs(State(state): SharedState) -> Json<Value> {
-    let dir = std::path::Path::new(&state.cfg.output.download_dir);
+    let cfg = state.cfg.read().await.clone();
+    let dir = std::path::Path::new(&cfg.output.download_dir);
     let mut packs: Vec<Value> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -105,7 +108,7 @@ pub async fn packs(State(state): SharedState) -> Json<Value> {
     }
     // 按修改时间倒序, 最新的排前面
     packs.sort_by(|a, b| b["modified"].as_str().cmp(&a["modified"].as_str()));
-    Json(json!({ "dir": state.cfg.output.download_dir, "packs": packs }))
+    Json(json!({ "dir": cfg.output.download_dir, "packs": packs }))
 }
 
 /// 在系统文件管理器中打开整合包输出目录 (目录不存在则先创建)。
@@ -113,7 +116,8 @@ pub async fn packs(State(state): SharedState) -> Json<Value> {
 /// 等文件管理器不解析相对路径 (会打开默认位置), 因此必须先转成绝对路径。
 /// 转换基准是进程工作目录 —— 与组包写入、列表读取用的是同一个基准, 保证打开的就是真正的输出目录。
 pub async fn packs_open(State(state): SharedState) -> Json<Value> {
-    let dir = &state.cfg.output.download_dir;
+    let cfg = state.cfg.read().await.clone();
+    let dir = &cfg.output.download_dir;
     if let Err(e) = std::fs::create_dir_all(dir) {
         return Json(json!({ "ok": false, "message": format!("无法创建目录 {dir}: {e:#}") }));
     }
@@ -154,7 +158,8 @@ pub async fn recommend(
     State(state): SharedState,
     Query(params): Query<RecommendParams>,
 ) -> Json<Value> {
-    let db = crate::database::UserDatabase::load(&state.cfg.db_path());
+    let cfg = state.cfg.read().await.clone();
+    let db = crate::database::UserDatabase::load(&cfg.db_path());
     match crate::pipeline::try_this(&state.modrinth, &db, &params.game_version, &params.loader)
         .await
     {
@@ -195,7 +200,8 @@ pub async fn feedback(State(state): SharedState, Json(req): Json<FeedbackRequest
     if req.verdict != "like" && req.verdict != "dislike" {
         return Json(json!({ "ok": false, "message": "verdict 必须是 like 或 dislike" }));
     }
-    let mut db = crate::database::UserDatabase::load(&state.cfg.db_path());
+    let cfg = state.cfg.read().await.clone();
+    let mut db = crate::database::UserDatabase::load(&cfg.db_path());
     let tags = match state.modrinth.project(&req.slug).await {
         Ok(p) => crate::pipeline::taste_tags(&p.categories),
         Err(_) => Vec::new(),
@@ -273,7 +279,7 @@ fn apply_preset(
 pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Response {
     let (out_tx, out_rx) = unbounded_channel::<Result<Bytes, Infallible>>();
     let agent = state.agent.clone();
-    let data_dir = state.cfg.data_dir();
+    let data_dir = state.cfg.read().await.data_dir();
     let text = apply_preset(req.text, &req.game_version, &req.loader, &req.search_limit);
 
     tokio::spawn(async move {
@@ -358,12 +364,13 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
 // 会话管理接口 (对应 CLI 的 /new /save /load)
 // ---------------------------------------------------------------------------
 
-/// 开启新会话: 重建一个全新 Agent (复用同一打断标记实例)
+/// 开启新会话: 重建一个全新 Agent (复用同一打断标记实例, 使用当前生效配置)
 pub async fn session_new(State(state): SharedState) -> Json<Value> {
+    let cfg = state.cfg.read().await.clone();
     match new_agent(
-        &state.cfg.llm,
-        &state.cfg.output.download_dir,
-        &state.cfg.db_path(),
+        &cfg.llm,
+        &cfg.output.download_dir,
+        &cfg.db_path(),
         state.interrupt.clone(),
     )
     .await
@@ -387,8 +394,9 @@ pub async fn chat_interrupt(State(state): SharedState) -> Json<Value> {
 
 /// 保存当前会话到 userdata/sessions/
 pub async fn session_save(State(state): SharedState) -> Json<Value> {
+    let data_dir = state.cfg.read().await.data_dir();
     let ag = state.agent.lock().await;
-    match history::save(&ag, &state.cfg.data_dir()) {
+    match history::save(&ag, &data_dir) {
         Ok(p) => Json(json!({ "ok": true, "message": format!("已保存: {p}") })),
         Err(e) => Json(json!({ "ok": false, "message": format!("{e:#}") })),
     }
@@ -396,8 +404,9 @@ pub async fn session_save(State(state): SharedState) -> Json<Value> {
 
 /// 加载最近一次保存的会话 (响应附带可渲染消息, 前端据此恢复对话显示)
 pub async fn session_load(State(state): SharedState) -> Json<Value> {
+    let data_dir = state.cfg.read().await.data_dir();
     let mut ag = state.agent.lock().await;
-    match history::load_latest(&mut ag, &state.cfg.data_dir()) {
+    match history::load_latest(&mut ag, &data_dir) {
         Ok(p) => Json(json!({
             "ok": true,
             "message": format!("已加载: {p}"),
@@ -409,7 +418,8 @@ pub async fn session_load(State(state): SharedState) -> Json<Value> {
 
 /// 列出会话目录下的会话文件, valid 为 true 的才可导入
 pub async fn sessions(State(state): SharedState) -> Json<Value> {
-    let list: Vec<Value> = history::list(&state.cfg.data_dir())
+    let data_dir = state.cfg.read().await.data_dir();
+    let list: Vec<Value> = history::list(&data_dir)
         .into_iter()
         .map(|s| {
             json!({
@@ -421,7 +431,7 @@ pub async fn sessions(State(state): SharedState) -> Json<Value> {
         })
         .collect();
     Json(json!({
-        "dir": history::sessions_dir(&state.cfg.data_dir()),
+        "dir": history::sessions_dir(&data_dir),
         "sessions": list
     }))
 }
@@ -441,7 +451,7 @@ pub async fn session_import(
     }
     let path = format!(
         "{}/{}",
-        history::sessions_dir(&state.cfg.data_dir()),
+        history::sessions_dir(&state.cfg.read().await.data_dir()),
         req.name
     );
     let mut ag = state.agent.lock().await;
@@ -457,7 +467,7 @@ pub async fn session_import(
 
 /// 在系统文件管理器中打开会话目录 (用户可手动放入合法的 session json 实现导入)
 pub async fn session_open(State(state): SharedState) -> Json<Value> {
-    let dir = history::sessions_dir(&state.cfg.data_dir());
+    let dir = history::sessions_dir(&state.cfg.read().await.data_dir());
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return Json(json!({ "ok": false, "message": format!("无法创建目录: {e:#}") }));
     }
@@ -466,4 +476,113 @@ pub async fn session_open(State(state): SharedState) -> Json<Value> {
         Ok(_) => Json(json!({ "ok": true, "message": format!("已打开目录: {}", abs.display()) })),
         Err(e) => Json(json!({ "ok": false, "message": format!("打开目录失败: {e:#}") })),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 设置接口: 运行时查看 / 修改 LLM 配置 (热更新 + 写回 config.toml)
+// ---------------------------------------------------------------------------
+
+/// 当前 LLM 设置。api_key 脱敏: 只回末 4 位 + 是否已设置, 绝不回传完整 key。
+pub async fn settings(State(state): SharedState) -> Json<Value> {
+    let cfg = state.cfg.read().await;
+    let key = cfg.llm.api_key.as_str();
+    let masked = if key.len() > 4 {
+        format!("***{}", &key[key.len() - 4..])
+    } else if !key.is_empty() {
+        "***".to_string()
+    } else {
+        String::new()
+    };
+    Json(json!({
+        "model": cfg.llm.model,
+        "base_url": cfg.llm.base_url,
+        "api_key_set": !key.is_empty(),
+        "api_key_masked": masked,
+        "context_length": cfg.llm.context_length,
+        "price_input_per_m": cfg.llm.price_input_per_m,
+        "price_output_per_m": cfg.llm.price_output_per_m,
+        "token_budget": cfg.llm.token_budget,
+        "max_tool_iterations": cfg.llm.max_tool_iterations,
+        "thinking": cfg.llm.thinking.clone().unwrap_or_default(),
+    }))
+}
+
+#[derive(Deserialize, Default)]
+pub struct SettingsRequest {
+    base_url: Option<String>,
+    /// 留空/缺省 = 保持现有 key 不变
+    api_key: Option<String>,
+    model: Option<String>,
+    context_length: Option<u64>,
+    price_input_per_m: Option<f64>,
+    price_output_per_m: Option<f64>,
+    token_budget: Option<u64>,
+    max_tool_iterations: Option<u32>,
+    /// 空串 = 清除 (不再发送任何思考参数); 其余原样透传
+    thinking: Option<String>,
+}
+
+/// 保存设置: 在配置副本上套用改动 -> 校验 -> 热更新当前 agent (会话保留)
+/// -> 写回 config.toml -> 更新全局配置。写回失败不回滚运行时配置, 只在消息中提示。
+pub async fn settings_update(
+    State(state): SharedState,
+    Json(req): Json<SettingsRequest>,
+) -> Json<Value> {
+    // 基础字段空值校验 (空 = 用户没填完整, 提前报错比静默保持旧值更直观)
+    for (name, v) in [("模型", &req.model), ("API 地址", &req.base_url)] {
+        if v.as_ref().is_some_and(|s| s.trim().is_empty()) {
+            return Json(json!({ "ok": false, "message": format!("{name}不能为空") }));
+        }
+    }
+    let mut cfg = state.cfg.read().await.clone();
+    if let Some(v) = req.base_url {
+        cfg.llm.base_url = v.trim().to_string();
+    }
+    if let Some(v) = req.api_key.filter(|s| !s.trim().is_empty()) {
+        cfg.llm.api_key = v.trim().to_string();
+    }
+    if let Some(v) = req.model {
+        cfg.llm.model = v.trim().to_string();
+    }
+    if let Some(v) = req.context_length {
+        cfg.llm.context_length = v;
+    }
+    if let Some(v) = req.price_input_per_m {
+        cfg.llm.price_input_per_m = v;
+    }
+    if let Some(v) = req.price_output_per_m {
+        cfg.llm.price_output_per_m = v;
+    }
+    if let Some(v) = req.token_budget {
+        cfg.llm.token_budget = v;
+    }
+    if let Some(v) = req.max_tool_iterations {
+        cfg.llm.max_tool_iterations = v;
+    }
+    if let Some(v) = req.thinking {
+        cfg.llm.thinking = match v.trim() {
+            "" => None,
+            s => Some(s.to_string()),
+        };
+    }
+    if let Err(e) = cfg.validate() {
+        return Json(json!({ "ok": false, "message": format!("设置未保存: {e:#}") }));
+    }
+
+    // 热更新当前 agent (锁与聊天互斥: 对话进行中会等本轮结束后再生效)
+    let llm = cfg.llm.clone();
+    {
+        let mut ag = state.agent.lock().await;
+        if let Err(e) = ag.update_llm(llm.clone()) {
+            return Json(json!({ "ok": false, "message": format!("设置未保存: {e:#}") }));
+        }
+    }
+
+    // 写回 config.toml; 失败不影响本次已生效的运行时配置
+    let message = match crate::config::save_llm(&state.config_path, &cfg.llm) {
+        Ok(()) => format!("已保存, 当前模型: {}", llm.model),
+        Err(e) => format!("运行时已生效, 但写入 config.toml 失败: {e:#}"),
+    };
+    *state.cfg.write().await = cfg;
+    Json(json!({ "ok": true, "message": message, "model": llm.model }))
 }

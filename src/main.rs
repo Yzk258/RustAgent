@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
         return pipeline::run_demo(&cfg, args.get(2).map(|s| s.as_str())).await;
     }
     if args.len() > 1 && args[1] == "ui" {
-        return ui::serve(cfg).await;
+        return ui::serve(cfg, "config.toml").await;
     }
     if args.len() > 2 && args[1] == "repair" {
         let modrinth = modrinth::ModrinthClient::new()?;

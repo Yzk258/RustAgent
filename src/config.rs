@@ -126,3 +126,97 @@ pub fn load(path: &str) -> anyhow::Result<Config> {
     cfg.validate().context("配置校验失败")?;
     Ok(cfg)
 }
+
+/// 写入键值并保留旧值的行内注释 (toml_edit 直接赋新值会丢掉原 decor)
+fn set_keep_decor(table: &mut toml_edit::Table, key: &str, v: toml_edit::Value) {
+    let mut item = toml_edit::Item::Value(v);
+    if let Some(old) = table.get(key).and_then(|i| i.as_value()) {
+        let decor = old.decor().clone();
+        if let Some(new) = item.as_value_mut() {
+            *new.decor_mut() = decor;
+        }
+    }
+    table.insert(key, item);
+}
+
+/// 把 [llm] 段写回 config.toml (设置窗口保存时调用)。
+/// 用 toml_edit 做文档级编辑, 保留用户文件里的注释与排版。
+/// thinking 为 None 时删除该键 (回到不发送任何参数的默认行为)。
+pub fn save_llm(path: &str, llm: &LlmConfig) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("读取 {path} 失败"))?;
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("{path} 不是合法 TOML, 无法写回设置"))?;
+    let item = doc["llm"].or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(table) = item.as_table_mut() else {
+        bail!("[llm] 段不是 TOML 表, 无法写回设置");
+    };
+    set_keep_decor(table, "base_url", llm.base_url.clone().into());
+    set_keep_decor(table, "api_key", llm.api_key.clone().into());
+    set_keep_decor(table, "model", llm.model.clone().into());
+    set_keep_decor(table, "context_length", (llm.context_length as i64).into());
+    set_keep_decor(table, "price_input_per_m", llm.price_input_per_m.into());
+    set_keep_decor(table, "price_output_per_m", llm.price_output_per_m.into());
+    set_keep_decor(table, "token_budget", (llm.token_budget as i64).into());
+    set_keep_decor(
+        table,
+        "max_tool_iterations",
+        (llm.max_tool_iterations as i64).into(),
+    );
+    match &llm.thinking {
+        Some(s) => set_keep_decor(table, "thinking", s.clone().into()),
+        None => {
+            table.remove("thinking");
+        }
+    }
+    std::fs::write(path, doc.to_string()).with_context(|| format!("写入 {path} 失败"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_llm_updates_values_and_keeps_comments() {
+        let dir = std::env::temp_dir().join(format!("rustagent-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# 顶部注释\n[llm]\nmodel = \"a\" # 行内注释\napi_key = \"k\"\nbase_url = \"http://x/v1\"\n\n[output]\ndownload_dir = \"./dl\"\n",
+        )
+        .unwrap();
+        let cfg = LlmConfig {
+            base_url: "http://y/v1".into(),
+            api_key: "k2".into(),
+            model: "b".into(),
+            context_length: 999,
+            price_input_per_m: 0.1,
+            price_output_per_m: 0.2,
+            token_budget: 5,
+            max_tool_iterations: 7,
+            thinking: Some("reasoning_effort=low".into()),
+        };
+        save_llm(path.to_str().unwrap(), &cfg).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# 顶部注释"), "段外注释应保留");
+        assert!(text.contains("# 行内注释"), "行内注释应保留");
+        let cfg2: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg2.llm.model, "b");
+        assert_eq!(cfg2.llm.context_length, 999);
+        assert_eq!(cfg2.llm.max_tool_iterations, 7);
+        assert_eq!(cfg2.llm.thinking.as_deref(), Some("reasoning_effort=low"));
+
+        // 清除 thinking -> 键应被移除
+        let cfg = LlmConfig {
+            thinking: None,
+            ..cfg
+        };
+        save_llm(path.to_str().unwrap(), &cfg).unwrap();
+        let reloaded = std::fs::read_to_string(&path).unwrap();
+        let cfg3: Config = toml::from_str(&reloaded).unwrap();
+        assert!(cfg3.llm.thinking.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

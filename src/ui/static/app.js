@@ -69,10 +69,17 @@ function scrollBottom() {
 
 function addMsg(cls, html) {
   removeWelcome();
+  // 消息行 = 头像 + 气泡; 返回气泡本身 (流式 reply_delta 直接改 textContent)
+  const row = document.createElement("div");
+  row.className = "msg-row " + cls;
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = cls === "user" ? "我" : cls === "error" ? "!" : "⛏";
   const div = document.createElement("div");
   div.className = "msg " + cls;
   div.innerHTML = html;
-  DOM.messages.appendChild(div);
+  row.append(avatar, div);
+  DOM.messages.appendChild(row);
   scrollBottom();
   return div;
 }
@@ -141,11 +148,39 @@ function hideThinking(thinking) {
   }
 }
 
+// 欢迎页快捷示例: 点击填入输入框 (不自动发送, 用户可改)
+const EXAMPLE_PROMPTS = [
+  "帮我组一个 1.20.1 fabric 的探索向整合包",
+  "找几个提升性能的优化 mod",
+  "1.21.1 neoforge 魔法题材整合包",
+  "推荐一些好看的视觉增强模组",
+];
+
 function showWelcome() {
   const div = document.createElement("div");
   div.className = "welcome";
-  div.innerHTML =
-    "<b>⛏ RustAgent</b><br>描述你想要的整合包, 例如:<br>“帮我组一个 1.20.1 fabric 的探索向整合包”";
+  const logo = document.createElement("div");
+  logo.className = "welcome-logo";
+  logo.textContent = "⛏";
+  const h = document.createElement("h2");
+  h.textContent = "今天想玩点什么?";
+  const p = document.createElement("p");
+  p.textContent = "描述你的想法, 我来检索 mod、检查兼容性并打包成可直接拖进启动器的 .mrpack";
+  const chips = document.createElement("div");
+  chips.className = "welcome-chips";
+  for (const ex of EXAMPLE_PROMPTS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip";
+    b.textContent = ex;
+    b.addEventListener("click", () => {
+      DOM.input.value = ex;
+      autoGrow();
+      DOM.input.focus();
+    });
+    chips.appendChild(b);
+  }
+  div.append(logo, h, p, chips);
   DOM.messages.appendChild(div);
 }
 
@@ -512,6 +547,66 @@ async function loadSessions() {
   } catch { /* ignore */ }
 }
 
+/* ---------- 设置窗口 (运行时改 LLM 配置, 保存后热生效并写回 config.toml) ---------- */
+async function openSettings() {
+  $("settings-modal").classList.remove("hidden");
+  try {
+    const s = await API.get("/api/settings");
+    $("set-model").value = s.model;
+    $("set-base-url").value = s.base_url;
+    $("set-api-key").value = "";
+    $("set-key-hint").textContent = s.api_key_set
+      ? `留空保持不变 (已设置 ${s.api_key_masked})`
+      : "尚未设置";
+    $("set-ctx").value = s.context_length;
+    $("set-budget").value = s.token_budget;
+    $("set-max-tools").value = s.max_tool_iterations;
+    $("set-price-in").value = s.price_input_per_m;
+    $("set-price-out").value = s.price_output_per_m;
+    $("set-thinking").value = s.thinking || "";
+  } catch {
+    toast("读取设置失败", true);
+  }
+}
+
+function closeSettings() {
+  $("settings-modal").classList.add("hidden");
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  if (state.busy) {
+    toast("请等待本轮对话结束再修改设置", true);
+    return;
+  }
+  const body = {
+    model: $("set-model").value.trim(),
+    base_url: $("set-base-url").value.trim(),
+    context_length: parseInt($("set-ctx").value, 10),
+    token_budget: parseInt($("set-budget").value, 10),
+    max_tool_iterations: parseInt($("set-max-tools").value, 10),
+    price_input_per_m: parseFloat($("set-price-in").value),
+    price_output_per_m: parseFloat($("set-price-out").value),
+    thinking: $("set-thinking").value.trim(),
+  };
+  const key = $("set-api-key").value.trim();
+  if (key) body.api_key = key;
+  // 空数字字段不发送 (保持原值), 避免 NaN 序列化成 null
+  for (const k of ["context_length", "token_budget", "max_tool_iterations", "price_input_per_m", "price_output_per_m"]) {
+    if (!Number.isFinite(body[k])) delete body[k];
+  }
+  try {
+    const r = await API.post("/api/settings", body);
+    toast(r.message, !r.ok);
+    if (r.ok) {
+      closeSettings();
+      loadInfo(); // 顶栏模型名随之刷新
+    }
+  } catch {
+    toast("请求失败", true);
+  }
+}
+
 /* ---------- 健康检查 ---------- */
 async function checkHealth() {
   const dot = DOM["status-dot"];
@@ -562,6 +657,16 @@ function loadPreset() {
     if (p.search_limit_custom) $("input-limit").value = p.search_limit_custom;
   } catch { /* 忽略损坏的历史数据 */ }
   updateCustomLimit();
+  syncLoaderSeg(); // 隐藏 input 恢复值后, 分段按钮高亮态跟随
+}
+
+// 加载器分段控件: 隐藏 input #sel-loader 是唯一数据源 (send/loadRecommend 读它),
+// 按钮只是视图, 点选与恢复预设后都调本函数同步高亮
+function syncLoaderSeg() {
+  const v = $("sel-loader").value;
+  $("seg-loader").querySelectorAll(".seg-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.value === v);
+  });
 }
 
 /* ---------- 输入框 ---------- */
@@ -594,7 +699,13 @@ $("btn-new").addEventListener("click", () => session("new"));
 $("btn-save").addEventListener("click", () => session("save"));
 $("btn-load").addEventListener("click", () => session("load"));
 $("sel-version").addEventListener("change", savePreset);
-$("sel-loader").addEventListener("change", savePreset);
+$("seg-loader").querySelectorAll(".seg-btn").forEach((b) => {
+  b.addEventListener("click", () => {
+    $("sel-loader").value = b.dataset.value;
+    syncLoaderSeg();
+    savePreset();
+  });
+});
 $("sel-limit").addEventListener("change", () => {
   updateCustomLimit();
   savePreset();
@@ -619,6 +730,14 @@ $("btn-open-dir").addEventListener("click", async () => {
   }
 });
 $("btn-rec").addEventListener("click", loadRecommend);
+$("btn-settings").addEventListener("click", openSettings);
+$("btn-settings-close").addEventListener("click", closeSettings);
+$("btn-settings-cancel").addEventListener("click", closeSettings);
+$("settings-mask").addEventListener("click", closeSettings);
+$("settings-form").addEventListener("submit", saveSettings);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeSettings();
+});
 
 loadPreset();
 showWelcome();

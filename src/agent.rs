@@ -97,6 +97,14 @@ impl Agent {
         self.interrupt.load(Ordering::Relaxed)
     }
 
+    /// 热更新 LLM 配置 (Web 设置窗口保存时调用): 重建客户端 + 刷新预算/上下文参数。
+    /// 会话历史与用量统计保留, 下一轮对话即用新配置。
+    pub fn update_llm(&mut self, cfg: LlmConfig) -> Result<()> {
+        self.llm = LlmClient::new(cfg.clone())?;
+        self.llm_cfg = cfg;
+        Ok(())
+    }
+
     /// CLI 入口: 与旧版行为一致, 在终端打印工具调用与最终回复。
     /// 内部复用 run_turn_with, 通过通道接收事件再打印, 保证两端行为同步。
     pub async fn run_turn(&mut self, input: &str) -> Result<()> {

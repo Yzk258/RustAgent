@@ -3,7 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0d0f14">
   <title>RustAgent · MC 模组管理助手</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>⛏</text></svg>">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -11,12 +13,13 @@
 
     <!-- 顶栏: 品牌名 / 当前模型 / 连接状态 -->
     <header id="topbar">
-      <div class="brand">⛏ RustAgent <span class="ver" id="ver"></span></div>
+      <div class="brand"><span class="brand-icon">⛏</span>RustAgent <span class="ver" id="ver"></span></div>
       <div class="model" id="model-name"></div>
       <div class="status">
         <span class="dot" id="status-dot"></span>
         <span id="status-text">连接中…</span>
       </div>
+      <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
     </header>
 
     <!-- 侧栏: 每张 .card 是一个独立面板, 新增功能面板时复制一个 section 并在 app.js 里补数据加载 -->
@@ -70,9 +73,11 @@
     <!-- 主聊天区 -->
     <main id="chat" aria-label="聊天工作区">
       <div id="messages" role="log" aria-live="polite" aria-label="对话记录"></div>
+      <!-- 预设工具栏: 单条胶囊, 与聊天区同宽对齐; 隐藏 input 保留原 id 供 JS 读取 -->
       <form id="presetbar" aria-label="整合包预设">
-        <label>MC 版本
-          <input id="sel-version" list="version-list" placeholder="如 1.21.1" autocomplete="off">
+        <div class="preset-bar">
+          <label class="plabel" for="sel-version">版本</label>
+          <input id="sel-version" list="version-list" placeholder="1.21.1" autocomplete="off" spellcheck="false">
           <datalist id="version-list">
             <option value="1.21.1"></option>
             <option value="1.21.4"></option>
@@ -85,16 +90,17 @@
             <option value="1.12.2"></option>
             <option value="1.7.10"></option>
           </datalist>
-        </label>
-        <label>加载器
-          <select id="sel-loader">
-            <option value="fabric" selected>fabric</option>
-            <option value="forge">forge</option>
-            <option value="neoforge">neoforge</option>
-            <option value="quilt">quilt</option>
-          </select>
-        </label>
-        <label>找包数量
+          <span class="preset-divider"></span>
+          <span class="plabel">加载器</span>
+          <div class="seg" id="seg-loader" role="group" aria-label="加载器">
+            <button type="button" class="seg-btn active" data-value="fabric">fabric</button>
+            <button type="button" class="seg-btn" data-value="forge">forge</button>
+            <button type="button" class="seg-btn" data-value="neoforge">neoforge</button>
+            <button type="button" class="seg-btn" data-value="quilt">quilt</button>
+          </div>
+          <input type="hidden" id="sel-loader" value="fabric">
+          <span class="preset-divider"></span>
+          <label class="plabel" for="sel-limit">数量</label>
           <select id="sel-limit">
             <option value="5">5 个</option>
             <option value="8" selected>8 个</option>
@@ -103,12 +109,11 @@
             <option value="20">20 个</option>
             <option value="custom">自定义</option>
           </select>
-        </label>
-        <span id="custom-limit-wrap" class="hidden">
-          <input id="input-limit" type="number" min="1" max="20" placeholder="1-20" autocomplete="off">
-          <span class="cap">上限 20</span>
-        </span>
-        <span class="hint">预设后 agent 直接按此执行, 不再追问</span>
+          <span id="custom-limit-wrap" class="hidden" title="单次对话上限 20">
+            <input id="input-limit" type="number" min="1" max="20" placeholder="1-20" autocomplete="off">
+          </span>
+          <span class="hint">预设后直接执行, 不再追问</span>
+        </div>
       </form>
       <form id="inputbar">
         <textarea id="input" rows="1"
@@ -117,6 +122,55 @@
         <button id="btn-send">发送</button>
       </form>
     </main>
+  </div>
+
+  <!-- 设置弹窗: 运行时修改 LLM 配置, 保存后热生效并写回 config.toml -->
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="设置">
+    <div class="modal-mask" id="settings-mask"></div>
+    <div class="modal-panel">
+      <div class="modal-head">
+        <h3>⚙ 设置</h3>
+        <button type="button" id="btn-settings-close" class="icon-btn" title="关闭">✕</button>
+      </div>
+      <form id="settings-form" class="modal-body">
+        <label class="field">模型
+          <input id="set-model" autocomplete="off" spellcheck="false" placeholder="如 deepseek-chat">
+        </label>
+        <label class="field">API 地址
+          <input id="set-base-url" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com/v1">
+        </label>
+        <label class="field">API Key
+          <input id="set-api-key" type="password" autocomplete="off" placeholder="">
+          <span class="field-hint" id="set-key-hint"></span>
+        </label>
+        <div class="field-grid">
+          <label class="field">上下文长度
+            <input id="set-ctx" type="number" min="256" step="1">
+          </label>
+          <label class="field">Token 预算 (0 = 不限)
+            <input id="set-budget" type="number" min="0" step="1000">
+          </label>
+          <label class="field">工具调用上限
+            <input id="set-max-tools" type="number" min="1" step="1">
+          </label>
+          <label class="field">输入单价 (元/百万)
+            <input id="set-price-in" type="number" min="0" step="0.01">
+          </label>
+          <label class="field">输出单价 (元/百万)
+            <input id="set-price-out" type="number" min="0" step="0.01">
+          </label>
+        </div>
+        <label class="field">思考模式透传
+          <input id="set-thinking" autocomplete="off" spellcheck="false" placeholder="如 reasoning_effort=medium, 留空不发送">
+          <span class="field-hint">key=value 格式, 逗号分隔多组; auto 或留空 = 不发送</span>
+        </label>
+        <div class="modal-foot">
+          <span class="field-hint">保存后立即生效, 并写回 config.toml</span>
+          <button type="button" id="btn-settings-cancel">取消</button>
+          <button type="submit" id="btn-settings-save" class="primary">保存</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <div id="toast" class="hidden"></div>
