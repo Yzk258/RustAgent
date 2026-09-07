@@ -13,7 +13,7 @@
 1. **智能搜索与组包**：描述需求（如"1.21.1 fabric 生存整合包，带点探索和装饰"），agent 调用 Modrinth API 搜索真实存在的 mod（绝不凭记忆瞎编），列出候选供你筛选，确认后自动补全前置依赖并生成 `.mrpack`。
 2. **用户口味数据库**：你对 mod 的喜欢/不喜欢反馈持续累积为标签权重（`userdata/userdata.db`），每次组包的记录也会入库，推荐随使用越来越精准。
 3. **"试试这个"**：根据你的口味画像，从 Modrinth 最新/热门 mod 中挑出你没评价过的新 mod；Web 界面侧栏有专属卡片，带 👍/👎 按钮直接写库，且与对话并行互不阻塞。
-4. **版本过滤与冲突检测**：按游戏版本、加载器自动过滤不兼容 mod；组包时检测冲突风险并汇报。
+4. **版本过滤与冲突检测**：按游戏版本、加载器自动过滤不兼容 mod；组包支持 fabric / forge / neoforge / quilt 四种加载器（各加载器最新稳定版从官方元数据实时获取并写入整合包依赖声明）；组包时检测冲突风险并汇报。
 5. **整合包修复**：把启动器报错（如"缺少 xxx 依赖"）贴给它，agent 自动找到缺失 mod 并补进原整合包，重新拖入启动器即可。
 6. **灵活的 LLM 接入**：任何 OpenAI 兼容 API（DeepSeek、OpenAI 等）或本地部署模型（如 Ollama）均可，只需改配置文件；支持透传思考模式参数（如 `reasoning_effort`、`enable_thinking`）。
 
@@ -126,7 +126,7 @@ cargo run -- ui
 ## 子命令
 
 ```bash
-cargo run -- selftest                 # 不耗 LLM token 的自检: 测试 Modrinth 搜索与组包、校验 .mrpack 格式
+cargo run -- selftest                 # 不耗 LLM token 的自检: 测试 Modrinth 搜索、四种加载器版本获取与组包、校验 .mrpack 格式
 cargo run -- demo                     # 无 LLM 的组包逻辑演示 (手动输入版本/加载器/主题)
 cargo run -- demo trythis             # 无 LLM 的"试试这个"推荐演示
 cargo run -- ui                       # 启动 Web 界面 (默认 http://127.0.0.1:1780, 自动打开浏览器)
@@ -162,7 +162,7 @@ cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # �
 agent 通过函数调用（tool calling）驱动以下工具，所有 mod 数据均来自 Modrinth 真实 API，不依赖模型记忆：
 
 - `search_mods` — 搜索 mod（支持中文关键词自动翻译、版本/加载器过滤）
-- `build_modpack` — 组包：解析依赖闭包、检测冲突、生成 `.mrpack`
+- `build_modpack` — 组包：解析依赖闭包、检测冲突、生成 `.mrpack`（支持 fabric / forge / neoforge / quilt）
 - `record_feedback` — 记录喜欢/不喜欢
 - `get_user_profile` — 读取口味画像用于个性化推荐
 - `recommend_new_mods` — "试试这个"推荐

@@ -191,10 +191,7 @@ pub struct FeedbackRequest {
 
 /// 记录喜欢/不喜欢 (写入用户数据库)。与对话工具 record_feedback 同一写库逻辑,
 /// 但不经过 LLM, 不持 agent 锁, 点击即生效。
-pub async fn feedback(
-    State(state): SharedState,
-    Json(req): Json<FeedbackRequest>,
-) -> Json<Value> {
+pub async fn feedback(State(state): SharedState, Json(req): Json<FeedbackRequest>) -> Json<Value> {
     if req.verdict != "like" && req.verdict != "dislike" {
         return Json(json!({ "ok": false, "message": "verdict 必须是 like 或 dislike" }));
     }

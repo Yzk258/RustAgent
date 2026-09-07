@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
 }
 
 async fn selftest(cfg: &config::Config) -> Result<()> {
-    println!("[1/2] Modrinth 搜索测试 (关键词 sodium, 限定 1.21.1 / fabric)");
+    println!("[1/3] Modrinth 搜索测试 (关键词 sodium, 限定 1.21.1 / fabric)");
     let mr = modrinth::ModrinthClient::new()?;
     let resp = mr
         .search(
@@ -273,8 +273,18 @@ async fn selftest(cfg: &config::Config) -> Result<()> {
         bail!("搜索无结果, facets 过滤可能有问题");
     }
 
-    println!("[2/2] 组包测试 (sodium + fabric-api, 含依赖闭包)");
+    println!("[2/3] 加载器版本获取测试 (forge / neoforge / quilt, MC 1.21.1)");
     let registry = ToolRegistry::new(mr, &cfg.output.download_dir, cfg.db_path());
+    for (name, gv) in [
+        ("forge", "1.21.1"),
+        ("neoforge", "1.21.1"),
+        ("quilt", "1.21.1"),
+    ] {
+        let v = registry.loader_version(name, gv).await?;
+        println!("  - {name}: {v}");
+    }
+
+    println!("[3/3] 组包测试 (sodium + fabric-api, 含依赖闭包)");
     let val = registry
         .execute(
             "build_modpack",
