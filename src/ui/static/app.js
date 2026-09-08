@@ -21,6 +21,9 @@ const state = {
   limitCap: 20,
 };
 
+// 当前对话轮的 fetch 控制器: 切换会话时用它丢弃旧轮的流式输出
+let chatController = null;
+
 const API = {
   request: async (path, options = {}) => {
     const response = await fetch(path, options);
@@ -312,7 +315,7 @@ async function loadRecommend() {
       ul.appendChild(li);
     }
   } catch {
-    DOM["rec-hint"].textContent = "请求失败";
+    DOM["rec-hint"].textContent = "请求失败, 请检查服务器连接!";
   }
 }
 
@@ -330,7 +333,7 @@ async function rateRec(slug, verdict, item, btn) {
     loadProfile();
     loadInfo();
   } catch {
-    toast("请求失败", true);
+    toast("请求失败, 请检查服务器连接!", true);
   }
 }
 
@@ -356,11 +359,13 @@ async function send() {
   const thinking = { el: null, timer: null }; // "思考中"行状态 + 每秒计时器
   pending.replyEl = null;
   showThinking(thinking);
+  chatController = new AbortController();
 
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: chatController.signal,
       body: JSON.stringify({
         text,
         game_version: DOM["sel-version"].value.trim() || undefined,
@@ -391,9 +396,11 @@ async function send() {
       }
     }
   } catch (e) {
+    if (e.name === "AbortError") return; // 主动切换会话丢弃旧轮输出, 不算错误
     hideThinking(thinking);
     addMsg("error", "连接失败: " + escapeHtml(e.message || e));
   } finally {
+    chatController = null;
     hideThinking(thinking);
     setBusy(false);
     refreshSidebar();
@@ -468,11 +475,15 @@ function handleEvent(ev, pending, progress, thinking) {
 }
 
 /* ---------- 会话管理 ---------- */
+// 对话进行中切换会话: 先打断当前轮并丢弃其流式输出 (后端在安全点收尾时会自动保存
+// 已产生的内容), 再执行切换 —— 新/加载/导入不再被 busy 阻塞
+function dropCurrentTurn() {
+  API.post("/api/chat/interrupt").catch(() => {});
+  chatController?.abort();
+}
+
 async function session(action) {
-  if (state.busy && (action === "new" || action === "import")) {
-    toast("请等待本轮对话结束", true);
-    return;
-  }
+  if (state.busy && action !== "save") dropCurrentTurn();
   try {
     const r = await API.post(`/api/session/${action}`);
     toast(r.message, !r.ok);
@@ -483,16 +494,13 @@ async function session(action) {
       refreshSidebar();
     }
   } catch {
-    toast("请求失败", true);
+    toast("请求失败, 请检查服务器连接!", true);
   }
 }
 
 // 导入指定会话文件 (点击会话列表条目触发)
 async function importSession(name) {
-  if (state.busy) {
-    toast("请等待本轮对话结束", true);
-    return;
-  }
+  if (state.busy) dropCurrentTurn();
   try {
     const r = await API.post("/api/session/import", { name });
     toast(r.message, !r.ok);
@@ -501,7 +509,7 @@ async function importSession(name) {
       loadInfo();
     }
   } catch {
-    toast("请求失败", true);
+    toast("请求失败, 请检查服务器连接!", true);
   }
 }
 
@@ -605,7 +613,7 @@ async function saveSettings(e) {
       loadInfo(); // 顶栏模型名随之刷新
     }
   } catch {
-    toast("请求失败", true);
+    toast("请求失败, 请检查服务器连接!", true);
   }
 }
 
@@ -694,7 +702,7 @@ $("btn-stop").addEventListener("click", async () => {
     const r = await API.post("/api/chat/interrupt");
     toast(r.message, !r.ok);
   } catch {
-    toast("请求失败", true);
+    toast("请求失败, 请检查服务器连接!", true);
   }
 });
 $("btn-new").addEventListener("click", () => session("new"));
@@ -719,7 +727,7 @@ $("btn-open-sessions").addEventListener("click", async () => {
     toast(r.message, !r.ok);
     if (r.ok) loadSessions();
   } catch {
-    toast("请求失败", true);
+    toast("请求失败, 请检查服务器连接!", true);
   }
 });
 $("btn-open-dir").addEventListener("click", async () => {
@@ -728,7 +736,7 @@ $("btn-open-dir").addEventListener("click", async () => {
     toast(r.message, !r.ok);
     if (r.ok) loadPacks();
   } catch {
-    toast("请求失败", true);
+    toast("请求失败, 请检查服务器连接!", true);
   }
 });
 $("btn-rec").addEventListener("click", loadRecommend);

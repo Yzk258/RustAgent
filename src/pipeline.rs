@@ -2,8 +2,8 @@ use crate::prelude::*;
 use std::collections::HashSet;
 
 use crate::config::Config;
-use crate::database::{FeedbackRecord, PackRecord, UserDatabase};
-use crate::modrinth::{Hit, ModrinthClient};
+use crate::providers::modrinth::{Hit, ModrinthClient};
+use crate::storage::database::{FeedbackRecord, PackRecord, UserDatabase};
 use crate::tools::ToolRegistry;
 
 pub struct ScoredHit {
@@ -225,6 +225,9 @@ pub fn is_valid_loader(s: &str) -> bool {
     VALID_LOADERS.contains(&s)
 }
 
+/// 单次对话找包数量上限 (CLI /set、Web 预设栏、search_mods clamp 三处共用)
+pub const MAX_SEARCH_LIMIT: u32 = 20;
+
 /// 生成 "[界面预设: ...] " 前缀, CLI 的 /set 与 Web 预设栏共用同一注入逻辑。
 /// 无任何有效项时返回 None (原样透传消息)。找包数量单次对话上限 20。
 pub fn preset_prefix(gv: Option<&str>, loader: Option<&str>, limit: Option<u32>) -> Option<String> {
@@ -239,7 +242,7 @@ pub fn preset_prefix(gv: Option<&str>, loader: Option<&str>, limit: Option<u32>)
             parts.push(format!("{ld} 加载器"));
         }
     }
-    if let Some(n) = limit.filter(|n| (1..=20).contains(n)) {
+    if let Some(n) = limit.filter(|n| (1..=MAX_SEARCH_LIMIT).contains(n)) {
         parts.push(format!("候选数量 {n}"));
     }
     if parts.is_empty() {
@@ -395,7 +398,7 @@ pub async fn run_demo(cfg: &Config, mode: Option<&str>) -> Result<()> {
         ModrinthClient::new()?,
         cfg.curseforge
             .enabled
-            .then(crate::curseforge::CfClient::new),
+            .then(crate::providers::curseforge::CfClient::new),
         &cfg.output.download_dir,
         cfg.db_path(),
     );

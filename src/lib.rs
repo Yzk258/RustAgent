@@ -4,12 +4,11 @@
 pub mod agent;
 pub mod cli;
 pub mod config;
-pub mod curseforge;
-pub mod database;
-pub mod history;
 pub mod llm;
-pub mod modrinth;
 pub mod pipeline;
+pub mod providers;
+pub mod selftest;
+pub mod storage;
 pub mod tools;
 pub mod ui;
 

@@ -25,7 +25,7 @@ pub struct AppState {
     pub cfg: Arc<tokio::sync::RwLock<Config>>,
     pub interrupt: Arc<AtomicBool>,
     /// Modrinth 客户端: 供"试试这个"推荐与反馈接口独立使用, 不持 agent 锁, 与对话流并行。
-    pub modrinth: crate::modrinth::ModrinthClient,
+    pub modrinth: crate::providers::modrinth::ModrinthClient,
     /// config.toml 路径 (设置写回用)
     pub config_path: String,
 }
@@ -42,7 +42,7 @@ pub async fn serve(cfg: Config, config_path: &str) -> Result<()> {
     let agent = Arc::new(tokio::sync::Mutex::new(
         new_agent(&cfg, interrupt.clone()).await?,
     ));
-    let modrinth = crate::modrinth::ModrinthClient::new()?;
+    let modrinth = crate::providers::modrinth::ModrinthClient::new()?;
     let state = AppState {
         agent,
         cfg: Arc::new(tokio::sync::RwLock::new(cfg)),

@@ -15,8 +15,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::AppState;
 use crate::agent::{new_agent, AgentEvent};
-use crate::history;
 use crate::prelude::*;
+use crate::storage::history;
 
 /// 所有 handler 共享的状态提取器类型
 type SharedState = State<std::sync::Arc<AppState>>;
@@ -61,7 +61,7 @@ pub async fn tools() -> Json<Value> {
 /// 用户口味数据库: 反馈统计 + 标签权重 + 历史组包记录
 pub async fn profile(State(state): SharedState) -> Json<Value> {
     let cfg = state.cfg.read().await.clone();
-    let db = crate::database::UserDatabase::load(&cfg.db_path());
+    let db = crate::storage::database::UserDatabase::load(&cfg.db_path());
     // 标签权重按绝对值从高到低排序, 只取前 12 个展示
     let mut weights: Vec<(String, f64)> = db.tag_weights().into_iter().collect();
     weights.sort_by(|a, b| {
@@ -160,7 +160,7 @@ pub async fn recommend(
     Query(params): Query<RecommendParams>,
 ) -> Json<Value> {
     let cfg = state.cfg.read().await.clone();
-    let db = crate::database::UserDatabase::load(&cfg.db_path());
+    let db = crate::storage::database::UserDatabase::load(&cfg.db_path());
     match crate::pipeline::try_this(&state.modrinth, &db, &params.game_version, &params.loader)
         .await
     {
@@ -202,12 +202,12 @@ pub async fn feedback(State(state): SharedState, Json(req): Json<FeedbackRequest
         return Json(json!({ "ok": false, "message": "verdict 必须是 like 或 dislike" }));
     }
     let cfg = state.cfg.read().await.clone();
-    let mut db = crate::database::UserDatabase::load(&cfg.db_path());
+    let mut db = crate::storage::database::UserDatabase::load(&cfg.db_path());
     let tags = match state.modrinth.project(&req.slug).await {
         Ok(p) => crate::pipeline::taste_tags(&p.categories),
         Err(_) => Vec::new(),
     };
-    db.rate(crate::database::FeedbackRecord {
+    db.rate(crate::storage::database::FeedbackRecord {
         slug: req.slug.clone(),
         verdict: req.verdict.clone(),
         tags: tags.clone(),
@@ -240,31 +240,20 @@ pub struct ChatRequest {
     /// 界面预设栏带来的加载器 (可选)
     #[serde(default)]
     pub loader: Option<String>,
-    /// 界面预设栏带来的找包数量 (可选), agent 作为 search_mods 的 limit 使用。
-    /// 宽容类型: 数字或数字字符串都接受, 非法值忽略, 避免反序列化失败引发 422。
+    /// 界面预设栏带来的找包数量 (可选), agent 作为 search_mods 的 limit 使用
     #[serde(default)]
-    pub search_limit: Option<serde_json::Value>,
-}
-
-/// 解析找包数量: 接受 JSON 数字或数字字符串, 单次对话上限 20, 其余返回 None
-fn parse_limit(v: &Option<serde_json::Value>) -> Option<u32> {
-    let n = match v.as_ref()? {
-        serde_json::Value::Number(n) => n.as_u64()?,
-        serde_json::Value::String(s) => s.trim().parse::<u64>().ok()?,
-        _ => return None,
-    };
-    u32::try_from(n).ok().filter(|n| (1..=20).contains(n))
+    pub search_limit: Option<u32>,
 }
 
 /// 把界面预设拼进用户消息: 无效值静默忽略, 不阻塞对话。
-/// 前缀生成逻辑与 CLI /preset 共用 pipeline::preset_prefix。
+/// 前缀生成逻辑与 CLI /set 共用 pipeline::preset_prefix。
 fn apply_preset(
     text: String,
     gv: &Option<String>,
     ld: &Option<String>,
-    limit: &Option<serde_json::Value>,
+    limit: Option<u32>,
 ) -> String {
-    match crate::pipeline::preset_prefix(gv.as_deref(), ld.as_deref(), parse_limit(limit)) {
+    match crate::pipeline::preset_prefix(gv.as_deref(), ld.as_deref(), limit) {
         Some(p) => format!("{p}{text}"),
         None => text,
     }
@@ -281,7 +270,7 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
     let (out_tx, out_rx) = unbounded_channel::<Result<Bytes, Infallible>>();
     let agent = state.agent.clone();
     let data_dir = state.cfg.read().await.data_dir();
-    let text = apply_preset(req.text, &req.game_version, &req.loader, &req.search_limit);
+    let text = apply_preset(req.text, &req.game_version, &req.loader, req.search_limit);
 
     tokio::spawn(async move {
         // 行发送闭包: 把一条 JSON 值作为一行 NDJSON 写入响应流
@@ -365,8 +354,13 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
 // 会话管理接口 (对应 CLI 的 /new /save /load)
 // ---------------------------------------------------------------------------
 
-/// 开启新会话: 重建一个全新 Agent (复用同一打断标记实例, 使用当前生效配置)
+/// 开启新会话: 重建一个全新 Agent (复用同一打断标记实例, 使用当前生效配置)。
+/// 若有对话进行中, 先请求打断 —— agent 在安全点秒级收尾并自动保存, 再等锁切换,
+/// 已产生的内容不会丢。
 pub async fn session_new(State(state): SharedState) -> Json<Value> {
+    state
+        .interrupt
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let cfg = state.cfg.read().await.clone();
     match new_agent(&cfg, state.interrupt.clone()).await {
         Ok(a) => {
@@ -396,8 +390,12 @@ pub async fn session_save(State(state): SharedState) -> Json<Value> {
     }
 }
 
-/// 加载最近一次保存的会话 (响应附带可渲染消息, 前端据此恢复对话显示)
+/// 加载最近一次保存的会话 (响应附带可渲染消息, 前端据此恢复对话显示)。
+/// 对话进行中调用: 先请求打断再等锁, 收尾保存完成后切换。
 pub async fn session_load(State(state): SharedState) -> Json<Value> {
+    state
+        .interrupt
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let data_dir = state.cfg.read().await.data_dir();
     let mut ag = state.agent.lock().await;
     match history::load_latest(&mut ag, &data_dir) {
@@ -435,7 +433,8 @@ pub struct ImportRequest {
     pub name: String,
 }
 
-/// 导入指定会话文件: 校验合法性后灌入 agent, 并返回可渲染消息
+/// 导入指定会话文件: 校验合法性后灌入 agent, 并返回可渲染消息。
+/// 对话进行中调用: 先请求打断再等锁, 收尾保存完成后切换。
 pub async fn session_import(
     State(state): SharedState,
     Json(req): Json<ImportRequest>,
@@ -443,6 +442,9 @@ pub async fn session_import(
     if req.name.contains('/') || req.name.contains('\\') || req.name.contains("..") {
         return Json(json!({ "ok": false, "message": "非法文件名" }));
     }
+    state
+        .interrupt
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let path = format!(
         "{}/{}",
         history::sessions_dir(&state.cfg.read().await.data_dir()),

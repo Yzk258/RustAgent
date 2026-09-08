@@ -91,7 +91,8 @@ pub fn load_latest(agent: &mut Agent, data_dir: &str) -> Result<String> {
     load_path(agent, &path.display().to_string())
 }
 
-/// 加载指定会话文件。serde 解析即合法性校验: 解析失败时 agent 保持原状
+/// 加载指定会话文件。serde 解析即合法性校验: 解析失败时 agent 保持原状。
+/// 之后继续对话的自动保存写回同一文件 (接着这个会话聊, 不再另存新文件)
 pub fn load_path(agent: &mut Agent, path: &str) -> Result<String> {
     let text = std::fs::read_to_string(path).with_context(|| format!("读取 {path} 失败"))?;
     let session: Session =
@@ -101,8 +102,8 @@ pub fn load_path(agent: &mut Agent, path: &str) -> Result<String> {
     agent.usage.completion_tokens = session.completion_tokens;
     agent.usage.total_tokens = session.total_tokens;
     agent.calls = session.calls;
-    // 重置自动保存目标: 后续对话写入新的 auto-*.json, 不覆盖被加载的历史文件
-    agent.session_file = None;
+    // 自动保存目标指向被加载的文件: 接着对话即原地续写
+    agent.session_file = Some(path.to_string());
     Ok(path.to_string())
 }
 

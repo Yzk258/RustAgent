@@ -100,11 +100,8 @@ struct ChatRequest<'a> {
     tools: Option<Vec<ToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
-    /// 流式调用专用 (chat_stream 设 true, 非流式请求不带该字段)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream_options: Option<StreamOptions>,
+    stream: bool,
+    stream_options: StreamOptions,
     /// config.thinking 透传的扩展字段 (enable_thinking / reasoning_effort 等)
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
@@ -173,17 +170,6 @@ struct StreamOptions {
     include_usage: bool,
 }
 
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-    usage: Option<Usage>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: Message,
-}
-
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
 pub struct Usage {
     #[serde(default)]
@@ -213,7 +199,7 @@ impl LlmClient {
     }
 
     /// 流式调用: assistant 文本增量通过 on_delta 逐段回调 (首个 token 即可见),
-    /// 完整消息与工具调用在流结束后拼装返回。服务端不支持流式时回退一次性解析。
+    /// 完整消息与工具调用在流结束后拼装返回。
     pub async fn chat_stream(
         &self,
         messages: Vec<Message>,
@@ -232,10 +218,10 @@ impl LlmClient {
             messages,
             tools,
             tool_choice,
-            stream: Some(true),
-            stream_options: Some(StreamOptions {
+            stream: true,
+            stream_options: StreamOptions {
                 include_usage: true,
-            }),
+            },
             extra,
         };
         let mut call = self
@@ -253,30 +239,6 @@ impl LlmClient {
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             bail!("LLM API 错误 {status}: {body}");
-        }
-        // 服务端忽略 stream 参数时返回普通 JSON, 按内容类型回退
-        let is_sse = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("text/event-stream"));
-        if !is_sse {
-            let resp: ChatResponse = resp.json().await?;
-            let message = resp
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("LLM 返回为空"))?
-                .message;
-            if let Some(t) = message.content.as_deref() {
-                if !t.is_empty() {
-                    on_delta(t);
-                }
-            }
-            return Ok(ChatResult {
-                message,
-                usage: resp.usage.unwrap_or_default(),
-            });
         }
 
         // SSE 逐行解析: "data: {json}" / "data: [DONE]"
