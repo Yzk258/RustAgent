@@ -23,6 +23,8 @@ pub enum AgentEvent {
     },
     /// 最终回复的增量片段 (流式输出, 打字机效果)
     ReplyDelta { text: String },
+    /// 推理型模型的思考增量 (仅前端展示"还没死机", 不进对话历史与存档)
+    ReasoningDelta { text: String },
     /// 最终自然语言回复 (完整文本, 紧跟在 ReplyDelta 序列之后)
     Reply { text: String },
     /// 单次 LLM API 调用返回的 token 用量 (每次 chat_stream 成功后发出, 供前端实时展示)
@@ -159,6 +161,8 @@ impl Agent {
                         pp.reply_end(&text, streaming);
                         streaming = false;
                     }
+                    AgentEvent::ReasoningDelta { .. } => { /* 推理增量: 仅 Web 展示, CLI 不打印 */
+                    }
                     AgentEvent::LlmUsage { .. } => { /* 用量事件: Web 侧栏用, CLI 不打印 */
                     }
                 }
@@ -207,12 +211,16 @@ impl Agent {
             // 超过 3s 无响应时 watchdog 周期发 "模型思考中… (Ns)" (工具调用分片
             // 阶段没有文本增量, 依然需要 watchdog 兜底)
             let delta_tx = tx.clone();
+            let reason_tx = tx.clone();
             let stream_result = tokio::select! {
                 r = self.llm.chat_stream(
                     self.messages.clone(),
                     Some(crate::tools::ToolRegistry::defs()),
                     |d| {
                         let _ = delta_tx.send(AgentEvent::ReplyDelta { text: d.to_string() });
+                    },
+                    |r| {
+                        let _ = reason_tx.send(AgentEvent::ReasoningDelta { text: r.to_string() });
                     },
                 ) => r,
                 _ = wait_interrupt(&self.interrupt) => {

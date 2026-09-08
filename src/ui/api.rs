@@ -300,6 +300,9 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
                     AgentEvent::ReplyDelta { text } => {
                         json!({ "type": "reply_delta", "text": text })
                     }
+                    AgentEvent::ReasoningDelta { text } => {
+                        json!({ "type": "reasoning_delta", "text": text })
+                    }
                     AgentEvent::Reply { text } => json!({ "type": "reply", "text": text }),
                     AgentEvent::LlmUsage {
                         prompt_tokens,

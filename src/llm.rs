@@ -199,12 +199,14 @@ impl LlmClient {
     }
 
     /// 流式调用: assistant 文本增量通过 on_delta 逐段回调 (首个 token 即可见),
+    /// 推理型模型的思考增量经 on_reasoning 单独回调 (仅展示用, 不进消息历史),
     /// 完整消息与工具调用在流结束后拼装返回。
     pub async fn chat_stream(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<ToolDef>>,
         mut on_delta: impl FnMut(&str),
+        mut on_reasoning: impl FnMut(&str),
     ) -> Result<ChatResult> {
         let tool_choice = tools.as_ref().map(|_| "auto".to_string());
         let extra = self
@@ -272,6 +274,16 @@ impl LlmClient {
                 let Some(delta) = v.pointer("/choices/0/delta") else {
                     continue;
                 };
+                // 推理型模型的思考增量: reasoning_content (DeepSeek/Qwen) 或 reasoning (OpenRouter)
+                if let Some(r) = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(|r| r.as_str())
+                {
+                    if !r.is_empty() {
+                        on_reasoning(r);
+                    }
+                }
                 if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
                     if !c.is_empty() {
                         content.push_str(c);

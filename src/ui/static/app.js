@@ -123,8 +123,31 @@ function clearProgress(progress) {
 
 // "思考中"提示: 覆盖等待 LLM 响应的空窗期 (发出消息后 / 工具结果返回后),
 // 有任何事件到达即消失, 避免用户以为卡死; 附每秒递增的已等待时长
+// LLM 等待期轮换的阶段提示: 秒数之外给一点"在干什么"的活性信号
+const THINKING_HINTS = [
+  "理解需求中",
+  "检索 mod 数据",
+  "核对版本与加载器",
+  "评估口味匹配",
+  "整理回复",
+];
+
+// 思考行统一渲染: 推理型模型的实时思考片段优先 (💭 + 尾部片段), 否则轮换阶段提示
+function renderThinking(thinking) {
+  if (!thinking.el) return;
+  const sec = Math.round((Date.now() - thinking.start) / 1000);
+  if (thinking.tail) {
+    const t = thinking.tail.replace(/\s+/g, " ").slice(-48);
+    thinking.el.textContent = `💭 ${t} (${sec}s)`;
+  } else {
+    const hint = THINKING_HINTS[Math.floor(sec / 3) % THINKING_HINTS.length];
+    thinking.el.textContent = `思考中 · ${hint}… (${sec}s)`;
+  }
+}
+
 function showThinking(thinking) {
   if (thinking.el) return;
+  thinking.tail = ""; // 新等待窗口: 清空上一段推理片段
   removeWelcome();
   const div = document.createElement("div");
   div.className = "tool-line progress thinking";
@@ -132,12 +155,8 @@ function showThinking(thinking) {
   DOM.messages.appendChild(div);
   scrollBottom();
   thinking.el = div;
-  const start = Date.now();
-  thinking.timer = setInterval(() => {
-    if (thinking.el) {
-      thinking.el.textContent = `思考中 (${Math.round((Date.now() - start) / 1000)}s)`;
-    }
-  }, 1000);
+  thinking.start = Date.now();
+  thinking.timer = setInterval(() => renderThinking(thinking), 1000);
 }
 
 function hideThinking(thinking) {
@@ -440,6 +459,12 @@ function handleEvent(ev, pending, progress, thinking) {
       progress.el.textContent = `⏳ ${progressPrefix(ev)}${ev.text}`;
       scrollBottom();
       break;
+    case "reasoning_delta": {
+      // 推理型模型的实时思考片段: 只更新思考行展示, 不进对话历史
+      thinking.tail = ((thinking.tail || "") + ev.text).slice(-200);
+      renderThinking(thinking);
+      break;
+    }
     case "reply_delta": {
       // 流式打字机: 增量阶段用纯文本追加, 完整 reply 到达后用 markdown 重渲染
       hideThinking(thinking);
