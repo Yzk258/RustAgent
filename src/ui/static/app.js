@@ -432,6 +432,9 @@ function handleEvent(ev, pending, progress, thinking) {
       break;
     }
     case "progress":
+      // LLM 等待期 (thinking 行存活时) 收到的 progress 只可能是后端 watchdog 的
+      // "模型思考中… (Ns)" —— 本地"思考中"行已在计时, 忽略避免同语义重复渲染
+      if (thinking.el) break;
       hideThinking(thinking);
       if (!progress.el) progress.el = addProgressLine();
       progress.el.textContent = `⏳ ${progressPrefix(ev)}${ev.text}`;
