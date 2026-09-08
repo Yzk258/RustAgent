@@ -132,8 +132,6 @@ cargo run -- ui
 
 ```bash
 cargo run -- selftest                 # 不耗 LLM token 的自检: 测试 Modrinth 搜索、四种加载器版本获取与组包、校验 .mrpack 格式
-cargo run -- demo                     # 无 LLM 的组包逻辑演示 (手动输入版本/加载器/主题)
-cargo run -- demo trythis             # 无 LLM 的"试试这个"推荐演示
 cargo run -- ui                       # 启动 Web 界面 (默认 http://127.0.0.1:1780, 自动打开浏览器)
 cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # 向已生成的整合包补入指定 mod
 ```
@@ -180,7 +178,7 @@ agent 通过函数调用（tool calling）驱动以下工具，所有 mod 数据
 ```
 src/
 ├── lib.rs        # 库入口: 模块组织 + prelude (anyhow/serde/Arc 等高频导入集中)
-├── main.rs       # 二进制入口: 子命令分发 (selftest / demo / ui / repair)
+├── main.rs       # 二进制入口: 子命令分发 (selftest / ui / repair)
 ├── selftest.rs   # selftest 子命令: 不耗 LLM token 的自检 (真网访问 Modrinth)
 ├── cli.rs        # CLI: 交互式 REPL 主循环 + 圆角横幅、ANSI 配色、CJK 宽度对齐、进度条
 ├── agent/        # Agent 主循环: LLM 对话、工具调度、上下文裁剪、预算、打断与进展
@@ -197,7 +195,7 @@ src/
 │   ├── repair.rs     # repair_pack
 │   ├── feedback.rs   # record_feedback / get_user_profile / recommend_new_mods
 │   └── loader_meta.rs # 四加载器版本获取与依赖键名
-├── pipeline.rs   # 纯逻辑管线: 排序、口味标签、依赖闭包 (可脱离 LLM 演示)
+├── pipeline.rs   # 纯逻辑管线: 排序、口味标签、依赖闭包、关键词翻译等纯规则
 ├── storage/      # 持久化
 │   ├── database.rs   # 用户口味数据库 (SQLite)
 │   └── history.rs    # 会话保存/加载 (含轮内检查点自动保存)
