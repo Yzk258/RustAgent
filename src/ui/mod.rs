@@ -34,6 +34,8 @@ pub struct AppState {
 const INDEX_HTML: &str = include_str!("static/index.html");
 const STYLE_CSS: &str = include_str!("static/style.css");
 const APP_JS: &str = include_str!("static/app.js");
+/// 第三方 markdown 渲染库 (marked v12, MIT) — 助手回复的富文本渲染
+const MARKED_JS: &str = include_str!("static/marked.min.js");
 
 /// 启动 Web UI 服务器 (cargo run -- ui)。config_path 用于设置窗口把改动写回配置文件。
 pub async fn serve(cfg: Config, config_path: &str) -> Result<()> {
@@ -86,6 +88,7 @@ fn router(state: AppState) -> Router {
             get(|| async { css_response(STYLE_CSS).await }),
         )
         .route("/app.js", get(|| async { js_response(APP_JS).await }))
+        .route("/marked.min.js", get(|| async { js_response(MARKED_JS).await }))
         // REST API
         .route("/api/health", get(api::health))
         .route("/api/info", get(api::info))

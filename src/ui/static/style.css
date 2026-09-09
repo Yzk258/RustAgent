@@ -11,6 +11,7 @@
   --bg-card: #161a22;                   /* 卡片背景 */
   --bg-raise: #1b202b;                  /* 次级按钮/嵌套块 */
   --bg-bubble: #1d2330;                 /* 助手气泡背景 */
+  --bg-code: rgba(0, 0, 0, 0.35);       /* 行内代码/代码块底 */
   --border: #262d3a;                    /* 边框 */
   --border-soft: rgba(255, 255, 255, 0.06);
   --text: #e9ecf2;                      /* 主文字 */
@@ -37,6 +38,7 @@
   --bg-card: #ffffff;
   --bg-raise: #eef1f6;
   --bg-bubble: #e9eef8;
+  --bg-code: rgba(21, 32, 56, 0.07);
   --border: #d7ddea;
   --border-soft: rgba(25, 35, 55, 0.12);
   --text: #1b2333;
@@ -359,12 +361,91 @@ html { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
 .msg.assistant code {
   font-family: var(--mono);
   font-size: 12px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--bg-code);
   padding: 1px 5px;
   border-radius: 4px;
   color: var(--accent-bright);
 }
-.msg.assistant strong { color: #fff; }
+.msg.assistant strong { color: var(--text); }
+
+/* markdown 富文本排版 (助手消息, marked 渲染): 块级结构, 取消气泡的 pre-wrap */
+.msg.md { white-space: normal; }
+.msg.md > :first-child { margin-top: 0; }
+.msg.md > :last-child { margin-bottom: 0; }
+.msg.md p { margin: 6px 0; }
+.msg.md h1, .msg.md h2, .msg.md h3, .msg.md h4, .msg.md h5, .msg.md h6 {
+  margin: 14px 0 6px;
+  line-height: 1.4;
+}
+.msg.md h1 { font-size: 1.25em; }
+.msg.md h2 { font-size: 1.15em; }
+.msg.md h3 { font-size: 1.06em; }
+.msg.md h4, .msg.md h5, .msg.md h6 { font-size: 1em; }
+.msg.md ul, .msg.md ol { margin: 6px 0; padding-left: 22px; }
+.msg.md li { margin: 3px 0; }
+.msg.md li > p { margin: 2px 0; }
+.msg.md li::marker { color: var(--accent); }
+.msg.md input[type="checkbox"] { accent-color: var(--accent); margin-right: 5px; }
+.msg.md a {
+  color: var(--accent-bright);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.msg.md a:hover { opacity: 0.8; }
+.msg.md blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+.msg.md pre {
+  position: relative;
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--bg-code);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.msg.md pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: pre;
+}
+.md-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raise);
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.msg.md pre:hover .md-copy { opacity: 1; }
+@media (hover: none) { .md-copy { opacity: 1; } }
+.md-copy:hover { color: var(--text); border-color: var(--accent); }
+.md-table-wrap { overflow-x: auto; margin: 8px 0; }
+.msg.md table { border-collapse: collapse; font-size: 13px; }
+.msg.md th, .msg.md td {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  text-align: left;
+}
+.msg.md th { background: var(--bg-raise); }
+.msg.md tr:nth-child(even) td { background: var(--bg-code); }
+.msg.md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
 .msg.error {
   background: rgba(248, 113, 113, 0.1);
   border: 1px solid rgba(248, 113, 113, 0.35);

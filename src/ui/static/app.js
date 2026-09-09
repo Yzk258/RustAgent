@@ -77,11 +77,78 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// 轻量 markdown: **加粗** 与 `行内代码`
+// markdown 渲染: marked 解析 (GFM 表格 + 单换行成 <br>), 再经 DOM 净化 ——
+// 剥离原始 HTML 标签与非 http(s) 链接、on* 属性, 防止 LLM 输出注入脚本
+const MD_TAGS = new Set([
+  "A", "B", "STRONG", "I", "EM", "S", "DEL", "CODE", "PRE", "UL", "OL", "LI",
+  "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6", "P", "BR", "HR",
+  "TABLE", "THEAD", "TBODY", "TFOOT", "TR", "TH", "TD", "SPAN", "INPUT",
+]);
+
 function renderText(s) {
-  return escapeHtml(s)
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>");
+  if (!window.marked) return escapeHtml(s); // 库加载失败时退回纯文本
+  const div = document.createElement("div");
+  div.innerHTML = marked.parse(String(s), { gfm: true, breaks: true });
+  for (const el of [...div.querySelectorAll("*")]) {
+    if (!MD_TAGS.has(el.tagName)) {
+      el.replaceWith(document.createTextNode(el.textContent));
+      continue;
+    }
+    for (const attr of [...el.attributes]) {
+      if (attr.name.toLowerCase().startsWith("on")) el.removeAttribute(attr.name);
+    }
+    if (el.tagName === "A") {
+      if (/^https?:/i.test(el.getAttribute("href") || "")) {
+        el.target = "_blank";
+        el.rel = "noopener noreferrer";
+      } else {
+        el.replaceWith(...el.childNodes);
+      }
+    }
+  }
+  // 表格横向可滚动; 代码块挂复制按钮 (点击处理在 messages 上统一委托)
+  for (const table of div.querySelectorAll("table")) {
+    const wrap = document.createElement("div");
+    wrap.className = "md-table-wrap";
+    table.replaceWith(wrap);
+    wrap.appendChild(table);
+  }
+  for (const pre of div.querySelectorAll("pre")) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "md-copy";
+    btn.textContent = "复制";
+    pre.appendChild(btn);
+  }
+  return div.innerHTML;
+}
+
+// 代码块复制: renderText 产出的按钮统一在此处理点击
+DOM.messages.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".md-copy");
+  if (!btn) return;
+  const code = btn.parentElement.querySelector("code");
+  try {
+    await navigator.clipboard.writeText(code ? code.textContent : "");
+    btn.textContent = "已复制";
+  } catch {
+    btn.textContent = "复制失败";
+  }
+  setTimeout(() => (btn.textContent = "复制"), 1500);
+});
+
+// 流式期间按帧合并重渲染 (每个 delta 都全量 parse 会浪费), 最终 reply 事件仍即时渲染
+let mdPaintQueued = false;
+function queueMdRender(pending) {
+  if (mdPaintQueued || !pending.replyEl) return;
+  mdPaintQueued = true;
+  requestAnimationFrame(() => {
+    mdPaintQueued = false;
+    if (pending.replyEl && pending.replyText != null) {
+      pending.replyEl.innerHTML = renderText(pending.replyText);
+      scrollBottom();
+    }
+  });
 }
 
 function scrollBottom() {
@@ -98,7 +165,7 @@ function addMsg(cls, html) {
   avatar.className = "avatar";
   avatar.textContent = cls === "user" ? "我" : cls === "error" ? "!" : "⛏";
   const div = document.createElement("div");
-  div.className = "msg " + cls;
+  div.className = "msg " + cls + (cls === "assistant" ? " md" : "");
   div.innerHTML = html;
   row.append(avatar, div);
   DOM.messages.appendChild(row);
@@ -485,11 +552,15 @@ function handleEvent(ev, pending, progress, thinking) {
       break;
     }
     case "reply_delta": {
-      // 流式打字机: 增量阶段用纯文本追加, 完整 reply 到达后用 markdown 重渲染
+      // 流式打字机: 增量累积, 按帧重渲染 markdown (粗体/列表/表格流式期间即生效)
       hideThinking(thinking);
       clearProgress(progress);
-      if (!pending.replyEl) pending.replyEl = addMsg("assistant", "");
-      pending.replyEl.textContent += ev.text;
+      if (!pending.replyEl) {
+        pending.replyEl = addMsg("assistant", "");
+        pending.replyText = "";
+      }
+      pending.replyText += ev.text;
+      queueMdRender(pending);
       scrollBottom();
       break;
     }
