@@ -354,7 +354,7 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
 }
 
 // ---------------------------------------------------------------------------
-// 会话管理接口 (对应 CLI 的 /new /save /load)
+// 会话管理接口
 // ---------------------------------------------------------------------------
 
 /// 开启新会话: 重建一个全新 Agent (复用同一打断标记实例, 使用当前生效配置)。
@@ -381,34 +381,6 @@ pub async fn chat_interrupt(State(state): SharedState) -> Json<Value> {
         .interrupt
         .store(true, std::sync::atomic::Ordering::Relaxed);
     Json(json!({ "ok": true, "message": "已发送打断请求, 任务将在安全点停止" }))
-}
-
-/// 保存当前会话到 userdata/sessions/
-pub async fn session_save(State(state): SharedState) -> Json<Value> {
-    let data_dir = state.cfg.read().await.data_dir();
-    let ag = state.agent.lock().await;
-    match history::save(&ag, &data_dir) {
-        Ok(p) => Json(json!({ "ok": true, "message": format!("已保存: {p}") })),
-        Err(e) => Json(json!({ "ok": false, "message": format!("{e:#}") })),
-    }
-}
-
-/// 加载最近一次保存的会话 (响应附带可渲染消息, 前端据此恢复对话显示)。
-/// 对话进行中调用: 先请求打断再等锁, 收尾保存完成后切换。
-pub async fn session_load(State(state): SharedState) -> Json<Value> {
-    state
-        .interrupt
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    let data_dir = state.cfg.read().await.data_dir();
-    let mut ag = state.agent.lock().await;
-    match history::load_latest(&mut ag, &data_dir) {
-        Ok(p) => Json(json!({
-            "ok": true,
-            "message": format!("已加载: {p}"),
-            "messages": history::renderable_messages(&ag),
-        })),
-        Err(e) => Json(json!({ "ok": false, "message": format!("{e:#}") })),
-    }
 }
 
 /// 列出会话目录下的会话文件, valid 为 true 的才可导入

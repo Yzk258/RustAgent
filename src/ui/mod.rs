@@ -106,8 +106,6 @@ fn router(state: AppState) -> Router {
         .route("/api/chat/interrupt", post(api::chat_interrupt))
         // 会话管理
         .route("/api/session/new", post(api::session_new))
-        .route("/api/session/save", post(api::session_save))
-        .route("/api/session/load", post(api::session_load))
         .route("/api/session/import", post(api::session_import))
         .route("/api/session/open", post(api::session_open))
         .route("/api/sessions", get(api::sessions))

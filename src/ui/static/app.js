@@ -504,19 +504,18 @@ function handleEvent(ev, pending, progress, thinking) {
 
 /* ---------- 会话管理 ---------- */
 // 对话进行中切换会话: 先打断当前轮并丢弃其流式输出 (后端在安全点收尾时会自动保存
-// 已产生的内容), 再执行切换 —— 新/加载/导入不再被 busy 阻塞
+// 已产生的内容), 再执行切换 —— 新建/导入不再被 busy 阻塞
 function dropCurrentTurn() {
   API.post("/api/chat/interrupt").catch(() => {});
   chatController?.abort();
 }
 
-async function session(action) {
-  if (state.busy && action !== "save") dropCurrentTurn();
+async function newSession() {
+  if (state.busy) dropCurrentTurn();
   try {
-    const r = await API.post(`/api/session/${action}`);
+    const r = await API.post("/api/session/new");
     toast(r.message, !r.ok);
-    if (r.ok && Array.isArray(r.messages)) renderHistory(r.messages);
-    if (action === "new" && r.ok) {
+    if (r.ok) {
       DOM.messages.innerHTML = "";
       showWelcome();
       refreshSidebar();
@@ -541,7 +540,7 @@ async function importSession(name) {
   }
 }
 
-// 把导入/加载的历史消息渲染到聊天区
+// 把导入的历史消息渲染到聊天区
 function renderHistory(messages) {
   DOM.messages.innerHTML = "";
   for (const m of messages) {
@@ -733,9 +732,7 @@ $("btn-stop").addEventListener("click", async () => {
     toast("请求失败, 请检查服务器连接!", true);
   }
 });
-$("btn-new").addEventListener("click", () => session("new"));
-$("btn-save").addEventListener("click", () => session("save"));
-$("btn-load").addEventListener("click", () => session("load"));
+$("btn-new").addEventListener("click", newSession);
 $("sel-version").addEventListener("change", savePreset);
 $("seg-loader").querySelectorAll(".seg-btn").forEach((b) => {
   b.addEventListener("click", () => {
