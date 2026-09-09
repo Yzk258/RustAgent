@@ -30,7 +30,44 @@
   --mono: "Cascadia Code", Consolas, monospace;
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6fa;
+  --bg-panel: rgba(255, 255, 255, 0.88);
+  --bg-card: #ffffff;
+  --bg-raise: #eef1f6;
+  --bg-bubble: #e9eef8;
+  --border: #d7ddea;
+  --border-soft: rgba(25, 35, 55, 0.12);
+  --text: #1b2333;
+  --text-dim: #68738a;
+  --accent: #4169d8;
+  --accent-bright: #3155bd;
+  --accent-soft: rgba(65, 105, 216, 0.12);
+  --green: #16845b;
+  --red: #c54141;
+  --yellow: #a66b00;
+  --shadow-1: 0 1px 2px rgba(30, 45, 75, 0.12), 0 6px 20px rgba(30, 45, 75, 0.08);
+  --shadow-accent: 0 4px 18px rgba(65, 105, 216, 0.22);
+}
+
+:root[data-theme="light"] body {
+  background:
+    radial-gradient(1100px 700px at 85% -10%, rgba(139, 92, 246, 0.08), transparent 60%),
+    radial-gradient(900px 600px at -10% 110%, rgba(91, 140, 255, 0.07), transparent 55%),
+    var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+/* 图标字符会在主题切换时立即替换，避免再叠加一段颜色动画。 */
+#btn-theme { transition: none; }
 
 body {
   /* 叠三层低饱和光晕打底, 聊天区透明露出层次感 */
@@ -50,6 +87,7 @@ body {
 
 /* 细滚动条 */
 html { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
+:root[data-theme="light"] html { scrollbar-color: #b9c2d2 transparent; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
@@ -428,7 +466,7 @@ html { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
 /* 单条胶囊工具栏, 与聊天区阅读宽度对齐 */
 .preset-bar {
   width: min(100%, 860px);
-  margin-inline: auto;
+  margin: 5px auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;

@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#0d0f14">
+  <meta name="theme-color" content="#0d0f14" id="theme-color">
+  <script>document.documentElement.dataset.theme = localStorage.getItem("rustagent-theme") === "light" ? "light" : "dark";</script>
   <title>RustAgent · MC 模组管理助手</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>⛏</text></svg>">
   <link rel="stylesheet" href="/style.css">
@@ -19,6 +20,7 @@
         <span class="dot" id="status-dot"></span>
         <span id="status-text">连接中…</span>
       </div>
+      <button id="btn-theme" class="icon-btn" type="button" title="切换到白天模式" aria-label="切换到白天模式">☀</button>
       <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
     </header>
 

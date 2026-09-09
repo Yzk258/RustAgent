@@ -53,6 +53,25 @@ function toast(msg, isErr = false) {
   toastTimer = setTimeout(() => el.classList.add("hidden"), 3000);
 }
 
+function applyTheme(theme) {
+  const light = theme === "light";
+  const next = light ? "light" : "dark";
+  const button = $("btn-theme");
+  if (document.documentElement.dataset.theme === next && button.dataset.ready === "true") return;
+  document.documentElement.dataset.theme = next;
+  button.textContent = light ? "☾" : "☀";
+  button.title = light ? "切换到黑夜模式" : "切换到白天模式";
+  button.setAttribute("aria-label", button.title);
+  $("theme-color").setAttribute("content", light ? "#f4f6fa" : "#0d0f14");
+  button.dataset.ready = "true";
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  localStorage.setItem("rustagent-theme", next);
+  applyTheme(next);
+}
+
 /* ---------- 消息渲染 ---------- */
 function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -733,6 +752,7 @@ $("btn-stop").addEventListener("click", async () => {
   }
 });
 $("btn-new").addEventListener("click", newSession);
+$("btn-theme").addEventListener("click", toggleTheme);
 $("sel-version").addEventListener("change", savePreset);
 $("seg-loader").querySelectorAll(".seg-btn").forEach((b) => {
   b.addEventListener("click", () => {
@@ -774,6 +794,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeSettings();
 });
 
+applyTheme(localStorage.getItem("rustagent-theme") || "dark");
 loadPreset();
 showWelcome();
 checkHealth();
