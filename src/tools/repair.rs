@@ -94,14 +94,15 @@ impl super::ToolRegistry {
             None,
             None,
         );
-        let (final_slugs, auto_added, closure_conflicts) = crate::pipeline::dependency_closure(
-            &self.modrinth,
-            &game_version,
-            loader,
-            &a.add_slugs,
-            ctx,
-        )
-        .await?;
+        let (final_slugs, auto_added, closure_conflicts, resolved) =
+            crate::pipeline::dependency_closure(
+                &self.modrinth,
+                &game_version,
+                loader,
+                &a.add_slugs,
+                ctx,
+            )
+            .await?;
         let mut conflicts: Vec<String> = closure_conflicts;
 
         let mut added: Vec<serde_json::Value> = Vec::new();
@@ -110,31 +111,38 @@ impl super::ToolRegistry {
             .and_then(|f| f.as_array_mut())
             .ok_or_else(|| anyhow::anyhow!("索引 files 异常"))?;
         // 并发收集 (跨 slug 并发 versions + project), 复用 build_modpack 的模式。
-        // 原串行版逐个请求; 并发后一批同时发出, repair 耗时大幅下降。
+        // 优先复用 dependency_closure 已解析的 resolved 缓存 (省 versions 调用);
+        // repair 的 add_slugs 都是 dependency_closure 的种子, 缓存几乎全命中。
         let total = final_slugs.len();
+        let resolved = std::sync::Arc::new(resolved);
         let mut set = tokio::task::JoinSet::new();
         for slug in final_slugs.iter() {
             let client = self.modrinth.clone();
             let slug = slug.clone();
             let game_version = game_version.clone();
             let loader = loader.to_string();
+            let resolved = resolved.clone();
             set.spawn(async move {
-                let versions = match client.versions(&slug, &game_version, &loader).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return RepairOutcome::Conflict {
-                            slug,
-                            issue: format!("{e:#}"),
-                        };
-                    }
-                };
-                let v = match crate::providers::modrinth::latest_version(versions) {
-                    Some(v) => v,
-                    None => {
-                        return RepairOutcome::Conflict {
-                            slug,
-                            issue: format!("无 {game_version}/{loader} 兼容版本"),
-                        };
+                let v = if let Some(cached) = resolved.get(&slug) {
+                    cached.clone()
+                } else {
+                    let versions = match client.versions(&slug, &game_version, &loader).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return RepairOutcome::Conflict {
+                                slug,
+                                issue: format!("{e:#}"),
+                            };
+                        }
+                    };
+                    match crate::providers::modrinth::latest_version(versions) {
+                        Some(v) => v,
+                        None => {
+                            return RepairOutcome::Conflict {
+                                slug,
+                                issue: format!("无 {game_version}/{loader} 兼容版本"),
+                            };
+                        }
                     }
                 };
                 let file = match v

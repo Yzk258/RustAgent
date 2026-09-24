@@ -31,7 +31,7 @@ pub struct Project {
     pub categories: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct ModVersion {
     pub version_number: String,
     /// 发布时间 (ISO8601, 如 "2024-01-15T12:00:00.000Z")。用于跨版本按新旧排序,
@@ -44,7 +44,7 @@ pub struct ModVersion {
     pub files: Vec<VersionFile>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Dependency {
     pub dependency_type: String,
     #[serde(default)]

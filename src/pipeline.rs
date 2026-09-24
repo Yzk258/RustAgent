@@ -76,10 +76,20 @@ pub async fn dependency_closure(
     loader: &str,
     seeds: &[String],
     ctx: &crate::tools::TaskCtx,
-) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+) -> Result<(
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    std::collections::HashMap<String, crate::providers::modrinth::ModVersion>,
+)> {
+    use std::collections::HashMap;
+    use crate::providers::modrinth::ModVersion;
     let mut all: Vec<String> = seeds.to_vec();
     let mut auto_added: Vec<String> = Vec::new();
     let mut conflicts: Vec<String> = Vec::new();
+    // 缓存每个 slug 已解析的最新版本 (含 files), 返回给 build/repair 复用,
+    // 避免它们对同一 slug 再调一次 versions() (减半网络请求)
+    let mut resolved: HashMap<String, ModVersion> = HashMap::new();
     let mut seen_slugs: HashSet<String> = seeds.iter().cloned().collect();
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut frontier: Vec<String> = seeds.to_vec();
@@ -141,6 +151,7 @@ pub async fn dependency_closure(
                             continue;
                         }
                     };
+                    resolved.insert(slug.clone(), v.clone());
                     for dep in &v.dependencies {
                         if dep.dependency_type != "required" {
                             continue;
@@ -197,7 +208,7 @@ pub async fn dependency_closure(
         }
         frontier = new_frontier;
     }
-    Ok((all, auto_added, conflicts))
+    Ok((all, auto_added, conflicts, resolved))
 }
 
 const LOADER_TAGS: [&str; 5] = ["fabric", "forge", "neoforge", "quilt", "vanilla"];

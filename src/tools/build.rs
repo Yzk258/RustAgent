@@ -50,7 +50,7 @@ impl super::ToolRegistry {
             None,
             None,
         );
-        let (mut final_slugs, mut auto_added, closure_conflicts) =
+        let (mut final_slugs, mut auto_added, closure_conflicts, resolved) =
             crate::pipeline::dependency_closure(
                 &self.modrinth,
                 &a.game_version,
@@ -158,35 +158,42 @@ impl super::ToolRegistry {
         }
 
         let total = final_slugs.len();
-        // 并发收集: 跨 slug 并发 (每个 slug 内部 versions + project 两请求)。
-        // JoinSet 统一收集后按完成顺序拼装。reqwest::Client 内部 Arc, clone 廉价且线程安全。
-        // 原串行版 30 个 mod ≈ 60 次串行请求约 10s+; 并发后约 1-2s。
+        // 并发收集: 跨 slug 并发。优先复用 dependency_closure 已解析的 resolved 缓存
+        // (省掉一次 versions() 调用); 仅 CF 补全的 extra slug 不在缓存里才回退实时请求。
+        // project() 取 env 仍需调 (resolved 不含 env), 但 versions 这大头已减半。
+        let resolved = std::sync::Arc::new(resolved);
         let mut set = tokio::task::JoinSet::new();
         for slug in final_slugs.iter() {
             let client = self.modrinth.clone();
             let slug = slug.clone();
             let game_version = a.game_version.clone();
             let loader = a.loader.clone();
+            let resolved = resolved.clone();
             set.spawn(async move {
-                let versions = match client
-                    .versions(&slug, &game_version, &loader)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return CollectOutcome::Conflict {
-                            slug,
-                            issue: format!("无法获取版本信息: {e:#}"),
-                        };
-                    }
-                };
-                let v = match crate::providers::modrinth::latest_version(versions) {
-                    Some(v) => v,
-                    None => {
-                        return CollectOutcome::Conflict {
-                            slug,
-                            issue: format!("没有 {game_version} / {loader} 的兼容版本"),
-                        };
+                // 缓存命中: 直接用已解析的最新版本 (dependency_closure 调过 versions)
+                let v = if let Some(cached) = resolved.get(&slug) {
+                    cached.clone()
+                } else {
+                    let versions = match client
+                        .versions(&slug, &game_version, &loader)
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CollectOutcome::Conflict {
+                                slug,
+                                issue: format!("无法获取版本信息: {e:#}"),
+                            };
+                        }
+                    };
+                    match crate::providers::modrinth::latest_version(versions) {
+                        Some(v) => v,
+                        None => {
+                            return CollectOutcome::Conflict {
+                                slug,
+                                issue: format!("没有 {game_version} / {loader} 的兼容版本"),
+                            };
+                        }
                     }
                 };
                 let file = match v
