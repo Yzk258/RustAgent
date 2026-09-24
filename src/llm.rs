@@ -226,22 +226,49 @@ impl LlmClient {
             },
             extra,
         };
-        let mut call = self
-            .http
-            .post(format!(
-                "{}/chat/completions",
-                self.cfg.base_url.trim_end_matches('/')
-            ))
-            .json(&req);
-        if !self.cfg.api_key.is_empty() {
-            call = call.bearer_auth(&self.cfg.api_key);
+        // 网络抖动/服务端瞬时错误重试: send 失败或收到 429/5xx 时退避重发,
+        // 最多 3 次 (初始 + 2 重试), 退避 500ms / 2000ms 指数级。
+        // 4xx (除 429) 是配置/鉴权错误, 重试无用, 立即 bail。
+        // 流中途断不在此覆盖: 首个 chunk 已发出无法回退重发。
+        let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut resp = None;
+        for attempt in 0..3u32 {
+            let mut call = self.http.post(&url).json(&req);
+            if !self.cfg.api_key.is_empty() {
+                call = call.bearer_auth(&self.cfg.api_key);
+            }
+            match call.send().await {
+                Ok(r) => {
+                    let status = r.status();
+                    if status.is_success() {
+                        resp = Some(r);
+                        break;
+                    }
+                    let body = r.text().await.unwrap_or_default();
+                    let err = anyhow::anyhow!("LLM API 错误 {status}: {body}");
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    if retryable && attempt < 2 {
+                        let backoff = [500u64, 2000][attempt as usize];
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        last_err = Some(err);
+                        continue;
+                    }
+                    bail!(err);
+                }
+                Err(e) => {
+                    last_err = Some(anyhow::Error::from(e));
+                    if attempt < 2 {
+                        let backoff = [500u64, 2000][attempt as usize];
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                    }
+                }
+            }
         }
-        let resp = call.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("LLM API 错误 {status}: {body}");
-        }
+        let resp = resp.ok_or_else(|| {
+            last_err
+                .unwrap_or_else(|| anyhow::anyhow!("LLM 请求失败: 多次重试均未成功"))
+        })?;
 
         // SSE 逐行解析: "data: {json}" / "data: [DONE]"
         use tokio_stream::StreamExt;

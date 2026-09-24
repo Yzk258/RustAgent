@@ -3,6 +3,22 @@
 use super::*;
 use std::io::Write;
 
+/// 并发收集单个 mod 的结果: 成功拿到 jar 信息, 或记录一条冲突。
+/// 跨 slug 并发时各任务独立返回此枚举, 主线程收集后按完成顺序拼装 files/conflicts。
+enum CollectOutcome {
+    Mod {
+        slug: String,
+        version: String,
+        file: crate::providers::modrinth::VersionFile,
+        client_env: String,
+        server_env: String,
+    },
+    Conflict {
+        slug: String,
+        issue: String,
+    },
+}
+
 impl super::ToolRegistry {
     pub(super) async fn build_modpack(
         &self,
@@ -142,69 +158,120 @@ impl super::ToolRegistry {
         }
 
         let total = final_slugs.len();
-        for (i, slug) in final_slugs.iter().enumerate() {
-            ctx.check_interrupt()?;
+        // 并发收集: 跨 slug 并发 (每个 slug 内部 versions + project 两请求)。
+        // JoinSet 统一收集后按完成顺序拼装。reqwest::Client 内部 Arc, clone 廉价且线程安全。
+        // 原串行版 30 个 mod ≈ 60 次串行请求约 10s+; 并发后约 1-2s。
+        let mut set = tokio::task::JoinSet::new();
+        for slug in final_slugs.iter() {
+            let client = self.modrinth.clone();
+            let slug = slug.clone();
+            let game_version = a.game_version.clone();
+            let loader = a.loader.clone();
+            set.spawn(async move {
+                let versions = match client
+                    .versions(&slug, &game_version, &loader)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return CollectOutcome::Conflict {
+                            slug,
+                            issue: format!("无法获取版本信息: {e:#}"),
+                        };
+                    }
+                };
+                let v = match versions.first() {
+                    Some(v) => v,
+                    None => {
+                        return CollectOutcome::Conflict {
+                            slug,
+                            issue: format!("没有 {game_version} / {loader} 的兼容版本"),
+                        };
+                    }
+                };
+                let file = match v
+                    .files
+                    .iter()
+                    .find(|f| f.primary)
+                    .or_else(|| v.files.first())
+                {
+                    Some(f) => f,
+                    None => {
+                        return CollectOutcome::Conflict {
+                            slug,
+                            issue: "兼容版本没有可下载文件".to_string(),
+                        };
+                    }
+                };
+                let (client_env, server_env) = match client.project(&slug).await {
+                    Ok(p) => (p.client_side, p.server_side),
+                    Err(_) => ("required".to_string(), "required".to_string()),
+                };
+                CollectOutcome::Mod {
+                    slug,
+                    version: v.version_number.clone(),
+                    file: file.clone(),
+                    client_env,
+                    server_env,
+                }
+            });
+        }
+        let mut collected: Vec<CollectOutcome> = Vec::with_capacity(total);
+        while !ctx.interrupted() {
+            match set.join_next().await {
+                Some(Ok(o)) => collected.push(o),
+                Some(Err(_)) => {} // JoinError (任务 panic): 罕见, 跳过
+                None => break,
+            }
+        }
+        if ctx.interrupted() {
+            bail!(super::TOOL_INTERRUPTED);
+        }
+        let mut done = 0u64;
+        for outcome in collected {
+            done += 1;
             ctx.report(
-                format!("正在收集 mod {slug} ({}/{})", i + 1, total),
-                Some((i + 1) as u64),
+                format!("正在收集 mod ({}/{})", done, total),
+                Some(done),
                 Some(total as u64),
             );
-            if !seen.insert(slug.clone()) {
-                conflicts.push(json!({ "slug": slug, "issue": "重复添加" }));
-                continue;
+            match outcome {
+                CollectOutcome::Mod {
+                    slug,
+                    version,
+                    file,
+                    client_env,
+                    server_env,
+                } => {
+                    if !seen.insert(slug.clone()) {
+                        conflicts.push(json!({ "slug": slug, "issue": "重复添加" }));
+                        continue;
+                    }
+                    total_size += file.size;
+                    summaries.push(json!({
+                        "slug": slug,
+                        "version": version,
+                        "filename": file.filename,
+                        "size_mb": format!("{:.2}", file.size as f64 / 1_048_576.0),
+                    }));
+                    files.push(IndexFile {
+                        path: format!("mods/{}", file.filename),
+                        hashes: IndexHashes {
+                            sha1: file.hashes.sha1.clone(),
+                            sha512: file.hashes.sha512.clone(),
+                        },
+                        env: Env {
+                            client: client_env,
+                            server: server_env,
+                        },
+                        downloads: vec![file.url.clone()],
+                        file_size: file.size,
+                    });
+                }
+                CollectOutcome::Conflict { slug, issue } => {
+                    conflicts.push(json!({ "slug": slug, "issue": issue }));
+                }
             }
-            let versions = match self
-                .modrinth
-                .versions(slug, &a.game_version, &a.loader)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    conflicts
-                        .push(json!({ "slug": slug, "issue": format!("无法获取版本信息: {e:#}") }));
-                    continue;
-                }
-            };
-            let v = match versions.first() {
-                Some(v) => v,
-                None => {
-                    conflicts.push(json!({ "slug": slug, "issue": format!("没有 {} / {} 的兼容版本", a.game_version, a.loader) }));
-                    continue;
-                }
-            };
-            let Some(file) = v
-                .files
-                .iter()
-                .find(|f| f.primary)
-                .or_else(|| v.files.first())
-            else {
-                conflicts.push(json!({ "slug": slug, "issue": "兼容版本没有可下载文件" }));
-                continue;
-            };
-            let (client_env, server_env) = match self.modrinth.project(slug).await {
-                Ok(p) => (p.client_side, p.server_side),
-                Err(_) => ("required".to_string(), "required".to_string()),
-            };
-            total_size += file.size;
-            summaries.push(json!({
-                "slug": slug,
-                "version": v.version_number,
-                "filename": file.filename,
-                "size_mb": format!("{:.2}", file.size as f64 / 1_048_576.0),
-            }));
-            files.push(IndexFile {
-                path: format!("mods/{}", file.filename),
-                hashes: IndexHashes {
-                    sha1: file.hashes.sha1.clone(),
-                    sha512: file.hashes.sha512.clone(),
-                },
-                env: Env {
-                    client: client_env,
-                    server: server_env,
-                },
-                downloads: vec![file.url.clone()],
-                file_size: file.size,
-            });
         }
 
         if files.is_empty() {

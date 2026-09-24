@@ -98,51 +98,92 @@ pub async fn dependency_closure(
             None,
             None,
         );
-        let mut next_ids: Vec<String> = Vec::new();
+        // 并发获取 frontier 内每个 slug 的版本 (跨 slug 并发)。
+        // 原串行版 N 个 mod = N 次串行请求; 并发后一批同时发出, 依赖闭包总耗时大幅下降。
+        // ModrinthClient 内部 reqwest::Client 是 Arc, clone 廉价, 可安全 move 进 spawned 任务。
+        let mut set = tokio::task::JoinSet::new();
         for slug in &frontier {
-            ctx.check_interrupt()?;
-            let versions = match client.versions(slug, game_version, loader).await {
-                Ok(v) => v,
-                Err(e) => {
-                    conflicts.push(format!("{slug}: 获取版本失败 ({e:#})"));
-                    continue;
-                }
-            };
-            let v = match versions.first() {
-                Some(v) => v,
-                None => {
-                    conflicts.push(format!("{slug}: 没有 {game_version}/{loader} 兼容版本"));
-                    continue;
-                }
-            };
-            for dep in &v.dependencies {
-                if dep.dependency_type != "required" {
-                    continue;
-                }
-                if let Some(id) = &dep.project_id {
-                    if !seen_ids.contains(id) {
-                        seen_ids.insert(id.clone());
-                        next_ids.push(id.clone());
+            let client = client.clone();
+            let slug = slug.clone();
+            let gv = game_version.to_string();
+            let ld = loader.to_string();
+            set.spawn(async move {
+                let v = client.versions(&slug, &gv, &ld).await;
+                (slug, v)
+            });
+        }
+        let mut next_ids: Vec<String> = Vec::new();
+        while !ctx.interrupted() {
+            match set.join_next().await {
+                Some(Ok((slug, versions_result))) => {
+                    let versions = match versions_result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            conflicts.push(format!("{slug}: 获取版本失败 ({e:#})"));
+                            continue;
+                        }
+                    };
+                    let v = match versions.first() {
+                        Some(v) => v,
+                        None => {
+                            conflicts.push(format!(
+                                "{slug}: 没有 {game_version}/{loader} 兼容版本"
+                            ));
+                            continue;
+                        }
+                    };
+                    for dep in &v.dependencies {
+                        if dep.dependency_type != "required" {
+                            continue;
+                        }
+                        if let Some(id) = &dep.project_id {
+                            if !seen_ids.contains(id) {
+                                seen_ids.insert(id.clone());
+                                next_ids.push(id.clone());
+                            }
+                        }
                     }
                 }
+                Some(Err(_)) => {} // JoinError (任务 panic): 罕见, 跳过该条
+                None => break,
             }
         }
-        let mut new_frontier = Vec::new();
+        if ctx.interrupted() {
+            bail!(crate::tools::TOOL_INTERRUPTED);
+        }
+        // 并发解析新依赖 project_id -> slug (跨 id 并发)
+        let mut set2 = tokio::task::JoinSet::new();
         for id in next_ids {
-            ctx.check_interrupt()?;
-            let project = match client.project(&id).await {
-                Ok(p) => p,
-                Err(_) => {
-                    conflicts.push(format!("依赖 {id}: 无法解析"));
-                    continue;
+            let client = client.clone();
+            set2.spawn(async move {
+                let p = client.project(&id).await;
+                (id, p)
+            });
+        }
+        let mut new_frontier = Vec::new();
+        while !ctx.interrupted() {
+            match set2.join_next().await {
+                Some(Ok((id, project_result))) => {
+                    let project = match project_result {
+                        Ok(p) => p,
+                        Err(_) => {
+                            conflicts.push(format!("依赖 {id}: 无法解析"));
+                            continue;
+                        }
+                    };
+                    if !seen_slugs.contains(&project.slug) {
+                        seen_slugs.insert(project.slug.clone());
+                        all.push(project.slug.clone());
+                        auto_added.push(project.slug.clone());
+                        new_frontier.push(project.slug);
+                    }
                 }
-            };
-            if !seen_slugs.contains(&project.slug) {
-                seen_slugs.insert(project.slug.clone());
-                all.push(project.slug.clone());
-                auto_added.push(project.slug.clone());
-                new_frontier.push(project.slug);
+                Some(Err(_)) => {}
+                None => break,
             }
+        }
+        if ctx.interrupted() {
+            bail!(crate::tools::TOOL_INTERRUPTED);
         }
         frontier = new_frontier;
     }
@@ -151,7 +192,7 @@ pub async fn dependency_closure(
 
 const LOADER_TAGS: [&str; 5] = ["fabric", "forge", "neoforge", "quilt", "vanilla"];
 
-const KEYWORD_MAP: [(&str, &str); 24] = [
+const KEYWORD_MAP: [(&str, &str); 51] = [
     ("龙世界", "dragon"),
     ("恶龙", "dragon"),
     ("龙", "dragon"),
@@ -176,6 +217,35 @@ const KEYWORD_MAP: [(&str, &str); 24] = [
     ("食物", "food"),
     ("魔物", "monster"),
     ("空岛", "skyblock"),
+    // 新增: 能源/自动化/装备/农业/流体/导航/任务等高频中文词,
+    // 原表漏译这些会导致 Modrinth 搜索召回率下降 (中文关键词不转英文搜不到)
+    ("能源", "energy"),
+    ("电力", "energy"),
+    ("电量", "energy"),
+    ("能量", "energy"),
+    ("自动化", "automation"),
+    ("机械", "machine"),
+    ("机器", "machine"),
+    ("管道", "transport"),
+    ("物流", "transport"),
+    ("传输", "transport"),
+    ("护甲", "armor"),
+    ("防具", "armor"),
+    ("武器", "weapon"),
+    ("工具", "tool"),
+    ("农业", "farming"),
+    ("农场", "farming"),
+    ("种植", "farming"),
+    ("流体", "fluid"),
+    ("液体", "fluid"),
+    ("矿物", "ore"),
+    ("矿石", "ore"),
+    ("小地图", "minimap"),
+    ("任务", "quest"),
+    ("照明", "lighting"),
+    ("飞行", "flight"),
+    ("传送", "teleport"),
+    ("血量", "health"),
 ];
 
 pub fn translate_keyword(q: &str) -> String {

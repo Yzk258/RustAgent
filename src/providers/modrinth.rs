@@ -62,6 +62,10 @@ pub struct Hashes {
     pub sha512: String,
 }
 
+/// reqwest::Client 内部是 Arc, clone 廉价且线程安全。
+/// 加 Clone 是为了在并发组包时每个 spawn 的任务持有一份 owned 客户端,
+/// 避免借用生命周期冲突 (tokio::task::JoinSet::spawn 要求 'static)。
+#[derive(Clone)]
 pub struct ModrinthClient {
     http: reqwest::Client,
 }
