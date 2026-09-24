@@ -70,6 +70,18 @@ impl TaskCtx {
         }
         Ok(())
     }
+
+    /// 异步等待打断标记置位 (50ms 轮询), 供 tokio::select! 与并发 JoinSet::join_next 竞争。
+    /// 让并发组包的打断响应降到 50ms, 不必等单个 task 完成才检查
+    /// (最坏情况要等一个 Modrinth 请求超时 30s 才响应, 不够秒级)。
+    pub async fn await_interrupt(&self) {
+        loop {
+            if self.interrupted() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 }
 
 /// 单包用户所选 mod 数上限 (多次对话再合包同样按此判断)。

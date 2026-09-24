@@ -113,8 +113,15 @@ pub async fn dependency_closure(
             });
         }
         let mut next_ids: Vec<String> = Vec::new();
-        while !ctx.interrupted() {
-            match set.join_next().await {
+        loop {
+            let joined = tokio::select! {
+                j = set.join_next() => j,
+                _ = ctx.await_interrupt() => {
+                    set.abort_all();
+                    bail!(crate::tools::TOOL_INTERRUPTED);
+                }
+            };
+            match joined {
                 Some(Ok((slug, versions_result))) => {
                     let versions = match versions_result {
                         Ok(v) => v,
@@ -148,9 +155,6 @@ pub async fn dependency_closure(
                 None => break,
             }
         }
-        if ctx.interrupted() {
-            bail!(crate::tools::TOOL_INTERRUPTED);
-        }
         // 并发解析新依赖 project_id -> slug (跨 id 并发)
         let mut set2 = tokio::task::JoinSet::new();
         for id in next_ids {
@@ -161,8 +165,15 @@ pub async fn dependency_closure(
             });
         }
         let mut new_frontier = Vec::new();
-        while !ctx.interrupted() {
-            match set2.join_next().await {
+        loop {
+            let joined = tokio::select! {
+                j = set2.join_next() => j,
+                _ = ctx.await_interrupt() => {
+                    set2.abort_all();
+                    bail!(crate::tools::TOOL_INTERRUPTED);
+                }
+            };
+            match joined {
                 Some(Ok((id, project_result))) => {
                     let project = match project_result {
                         Ok(p) => p,
@@ -181,9 +192,6 @@ pub async fn dependency_closure(
                 Some(Err(_)) => {}
                 None => break,
             }
-        }
-        if ctx.interrupted() {
-            bail!(crate::tools::TOOL_INTERRUPTED);
         }
         frontier = new_frontier;
     }

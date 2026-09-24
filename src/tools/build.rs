@@ -217,15 +217,19 @@ impl super::ToolRegistry {
             });
         }
         let mut collected: Vec<CollectOutcome> = Vec::with_capacity(total);
-        while !ctx.interrupted() {
-            match set.join_next().await {
+        loop {
+            let joined = tokio::select! {
+                j = set.join_next() => j,
+                _ = ctx.await_interrupt() => {
+                    set.abort_all();
+                    bail!(super::TOOL_INTERRUPTED);
+                }
+            };
+            match joined {
                 Some(Ok(o)) => collected.push(o),
                 Some(Err(_)) => {} // JoinError (任务 panic): 罕见, 跳过
                 None => break,
             }
-        }
-        if ctx.interrupted() {
-            bail!(super::TOOL_INTERRUPTED);
         }
         let mut done = 0u64;
         for outcome in collected {
