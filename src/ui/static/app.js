@@ -149,16 +149,25 @@ DOM.messages.addEventListener("click", async (e) => {
 
 // 流式期间按帧合并重渲染 (每个 delta 都全量 parse 会浪费), 最终 reply 事件仍即时渲染。
 // scrollBottom 也并入本帧, 避免每个 delta 各触发一次 scrollTop 赋值导致高频重绘。
+// 自适应: 回复超 PARSE_LIMIT 字后切纯文本增量追加 (见 reply_delta), 避免长回复每帧
+// 全量 parse 整段越来越慢 (组包报告常数千字, 后期每帧 parse 50ms+ 卡顿)。
+const PARSE_LIMIT = 2000;
 let mdPaintQueued = false;
+let mdOverflowed = false; // 本轮回复是否已超阈值切纯文本模式
 function queueMdRender(pending) {
   if (mdPaintQueued || !pending.replyEl) return;
   mdPaintQueued = true;
   requestAnimationFrame(() => {
     mdPaintQueued = false;
-    if (pending.replyEl && pending.replyText != null) {
+    if (!pending.replyEl || pending.replyText == null) return;
+    if (mdOverflowed) {
+      // 纯文本模式: 只追加增量, 不 parse (最终 reply 事件会全量渲染)
+      pending.replyEl.textContent = pending.replyText;
+    } else {
       pending.replyEl.innerHTML = renderText(pending.replyText);
-      scrollBottom();
+      if (pending.replyText.length > PARSE_LIMIT) mdOverflowed = true;
     }
+    scrollBottom();
   });
 }
 
@@ -480,6 +489,7 @@ async function send() {
   const progress = { el: null }; // 当前实时进展行 (整个 turn 共用一个, 原地更新)
   const thinking = { el: null, timer: null }; // "思考中"行状态 + 每秒计时器
   pending.replyEl = null;
+  mdOverflowed = false; // 重置: 新一轮回复从实时 markdown 模式开始
   showThinking(thinking);
   chatController = new AbortController();
 
