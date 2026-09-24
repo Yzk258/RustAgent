@@ -693,18 +693,18 @@ pub async fn tool_trial(
                      Message::user(&analysis_prompt)],
                 None,
                 |delta| {
-                    let _ = fwd_tx.send(Ok(Bytes::from(
-                        format!(r#"{{"type":"analysis_delta","text":{}}}"#, serde_json::to_string(delta).unwrap_or_default())
-                    )));
+                    // NDJSON 每个事件必须以 \n 结尾, 前端按行切分解析 (与 send_line 一致)
+                    let _ = fwd_tx.send(Ok(Bytes::from(format!(
+                        "{}\n",
+                        json!({ "type": "analysis_delta", "text": delta })
+                    ))));
                 },
                 |_| {},
             )
             .await;
         match res {
             Ok(_) => {
-                let _ = out_tx.send(Ok(Bytes::from(
-                    r#"{"type":"done"}"#.to_string()
-                )));
+                send_line(json!({ "type": "done" }));
             }
             Err(e) => {
                 send_err(format!("AI 分析失败: {e:#}"));

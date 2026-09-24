@@ -121,6 +121,8 @@ fn router(state: AppState) -> Router {
         )
         // 工具试用 (直接执行工具拿标准输出 + AI 流式分析, 不经过对话循环)
         .route("/api/tool/trial", post(api::tool_trial))
+        // 对话主接口: NDJSON 流式返回 Agent 事件
+        .route("/api/chat", post(api::chat))
         .route("/api/chat/interrupt", post(api::chat_interrupt))
         // 会话管理
         .route("/api/session/new", post(api::session_new))

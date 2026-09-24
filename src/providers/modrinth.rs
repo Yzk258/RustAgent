@@ -29,6 +29,9 @@ pub struct Project {
     pub server_side: String,
     #[serde(default)]
     pub categories: Vec<String>,
+    /// 项目图标 URL (Modrinth CDN), 无图标时为空串。推荐卡片/试用展示用。
+    #[serde(default)]
+    pub icon_url: String,
 }
 
 #[derive(Deserialize, Clone)]

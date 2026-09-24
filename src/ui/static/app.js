@@ -478,8 +478,16 @@ async function loadRecommend() {
       const li = document.createElement("li");
       li.className = "rec-item";
       li.dataset.slug = m.slug;
+      // 图标 (无 icon_url 时用占位 emoji), 标题可点击跳转 Modrinth 官网
+      const iconHtml = m.icon_url
+        ? `<img class="rec-icon" src="${escapeHtml(m.icon_url)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+        : `<span class="rec-icon rec-icon-placeholder">📦</span>`;
       li.innerHTML =
-        `<div class="rec-name">${escapeHtml(m.title)} <span class="pmeta">${escapeHtml(m.slug)}</span></div>` +
+        `<div class="rec-head">${iconHtml}` +
+        `<div class="rec-head-text">` +
+        `<a class="rec-name" href="${escapeHtml(m.url || "https://modrinth.com/mod/" + m.slug)}" target="_blank" rel="noopener noreferrer" title="在 Modrinth 官网查看">${escapeHtml(m.title)}</a>` +
+        ` <span class="pmeta">${escapeHtml(m.slug)}</span>` +
+        `</div></div>` +
         `<div class="rec-desc">${escapeHtml(m.description)}</div>` +
         `<div class="rec-meta">${fmtDownloads(m.downloads)} 下载` +
         (m.categories?.length ? ` · ${escapeHtml(m.categories.join(", "))}` : "") +
