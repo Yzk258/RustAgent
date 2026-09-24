@@ -41,6 +41,8 @@ impl super::ToolRegistry {
                     "description": h.description,
                     "categories": h.display_categories,
                     "recent_game_versions": recent,
+                    "icon_url": h.icon_url,
+                    "url": format!("https://modrinth.com/mod/{}", h.slug),
                 })
             })
             .collect();

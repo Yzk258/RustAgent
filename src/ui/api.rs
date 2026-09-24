@@ -288,8 +288,13 @@ pub async fn chat(State(state): SharedState, Json(req): Json<ChatRequest>) -> Re
                     AgentEvent::ToolCall { name, args } => {
                         json!({ "type": "tool_call", "name": name, "args": args })
                     }
-                    AgentEvent::ToolResult { name, ok } => {
-                        json!({ "type": "tool_result", "name": name, "ok": ok })
+                    AgentEvent::ToolResult { name, ok, result } => {
+                        // result 携带工具返回 JSON, 前端识别 mod 列表渲染结构化卡片
+                        let mut v = json!({ "type": "tool_result", "name": name, "ok": ok });
+                        if let Some(r) = result {
+                            v["result"] = r;
+                        }
+                        v
                     }
                     AgentEvent::Progress {
                         text,

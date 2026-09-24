@@ -12,8 +12,14 @@ use crate::tools::ToolRegistry;
 pub enum AgentEvent {
     /// 开始调用某个工具 (args 为原始 JSON 参数字符串)
     ToolCall { name: String, args: String },
-    /// 某个工具执行完毕 (ok 表示是否成功)
-    ToolResult { name: String, ok: bool },
+    /// 某个工具执行完毕。result 携带工具返回的 JSON (供前端结构化渲染, 如 mod 卡片);
+    /// None 用于无返回数据或不便透出的工具。ok 表示是否成功。
+    ToolResult {
+        name: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+    },
     /// 工具内部的阶段性进展 (如 "正在收集 mod sodium (2/8)"), 原地更新展示;
     /// current/total 存在时前端可渲染进度条
     Progress {
@@ -140,7 +146,7 @@ impl Agent {
                             truncate(&args, 70)
                         ));
                     }
-                    AgentEvent::ToolResult { name, ok } => {
+                    AgentEvent::ToolResult { name, ok, .. } => {
                         if ok {
                             pp.line(&format!("  {} {}", paint(GREEN, "✓"), paint(DIM, &name)));
                         } else {
@@ -307,16 +313,22 @@ impl Agent {
                                 }
                             }
                         });
-                        let (result, ok, tool_interrupted) = match self
+                        // result_val: 原始 JSON Value (供前端结构化渲染 mod 卡片); 成功时才有
+                        // result_str: 序列化字符串 (给 LLM 消息历史, Message::tool 接收 String)
+                        let (result_val, result_str, ok, tool_interrupted) = match self
                             .tools
                             .execute(name, &call.function.arguments, &ctx)
                             .await
                         {
-                            Ok(v) => (v.to_string(), true, false),
+                            Ok(v) => {
+                                let s = v.to_string();
+                                (Some(v), s, true, false)
+                            }
                             Err(e) => {
                                 let s = format!("{e:#}");
                                 let interrupted = s.contains(crate::tools::TOOL_INTERRUPTED);
                                 (
+                                    None,
                                     serde_json::json!({ "error": s }).to_string(),
                                     false,
                                     interrupted,
@@ -326,12 +338,13 @@ impl Agent {
                         drop(ctx); // 关闭进展通道的唯一发送端, 等转发任务排空
                         let _ = forwarder.await;
                         watchdog.abort();
-                        // 发出工具结果事件
+                        // 发出工具结果事件 (带返回数据, 供前端结构化渲染)
                         let _ = tx.send(AgentEvent::ToolResult {
                             name: name.clone(),
                             ok,
+                            result: result_val,
                         });
-                        self.messages.push(Message::tool(&call.id, result));
+                        self.messages.push(Message::tool(&call.id, result_str));
                         self.checkpoint(); // 每个工具结果落盘, 组包等长任务中断/崩溃保留已有进展
                                            // 工具内部被打断: 不再回传 LLM 浪费 token, 直接收尾
                         if tool_interrupted {

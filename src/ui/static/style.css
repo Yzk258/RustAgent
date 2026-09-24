@@ -283,6 +283,35 @@ html { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
   word-break: break-all;
 }
 
+/* 对话区 mod 卡片网格 (search_mods/recommend 工具结果结构化渲染) */
+.mod-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.mod-card {
+  border: 1px solid var(--border-soft); border-radius: 11px; padding: 10px;
+  background: var(--bg-raise); transition: border-color 0.15s, transform 0.15s;
+}
+.mod-card:hover { border-color: rgba(109, 141, 255, 0.4); transform: translateY(-1px); }
+.mod-card-head { display: flex; gap: 8px; align-items: center; }
+.mod-card-icon { width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0; object-fit: cover; background: var(--bg-bubble); }
+.mod-card-icon-placeholder { display: flex; align-items: center; justify-content: center; font-size: 18px; }
+.mod-card-text { min-width: 0; flex: 1; }
+.mod-card-name { font-family: var(--mono); font-size: 13px; color: var(--accent-bright); text-decoration: none; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mod-card-name:hover { text-decoration: underline; }
+.mod-card-desc { font-size: 11px; color: var(--text-dim); margin-top: 6px; line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.mod-card-meta { font-size: 11px; color: var(--text-dim); margin-top: 5px; }
+.mod-card-gallery-btn {
+  margin-top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 5px;
+  border: 1px solid var(--border); background: transparent; color: var(--text-dim);
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.mod-card-gallery-btn:hover { color: var(--accent-bright); border-color: rgba(109, 141, 255, 0.55); }
+.mod-card-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; margin-top: 8px; }
+.mod-card-gallery img { width: 100%; border-radius: 6px; cursor: pointer; transition: opacity 0.15s; }
+.mod-card-gallery img:hover { opacity: 0.8; }
+
 /* 整合包列表 / 会话列表 (共用) */
 .pack-list { list-style: none; }
 .pack-list li { font-size: 12px; padding: 6px 8px; border-radius: 8px; }

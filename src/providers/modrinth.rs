@@ -20,6 +20,9 @@ pub struct Hit {
     pub display_categories: Vec<String>,
     #[serde(default)]
     pub versions: Vec<String>,
+    /// 项目图标 URL (Modrinth search API 自带, 无图标时为空串)。
+    #[serde(default)]
+    pub icon_url: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -32,6 +35,9 @@ pub struct Project {
     /// 项目图标 URL (Modrinth CDN), 无图标时为空串。推荐卡片/试用展示用。
     #[serde(default)]
     pub icon_url: String,
+    /// 项目截图集 (Modrinth CDN URL 列表), 对话区 mod 卡片可展开查看。通常 0-10 张。
+    #[serde(default)]
+    pub gallery: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]

@@ -722,6 +722,78 @@ async function send() {
   }
 }
 
+// 从工具返回数据提取 mod 列表: 识别 recommend_new_mods 的 recommendations
+// 和 search_mods 的 mods。每项需有 slug+title 才算 mod。
+function extractMods(result) {
+  if (!result || typeof result !== "object") return null;
+  for (const key of ["recommendations", "mods"]) {
+    const arr = result[key];
+    if (Array.isArray(arr) && arr.length && arr[0]?.slug && arr[0]?.title) {
+      return arr;
+    }
+  }
+  return null;
+}
+
+// 把 mod 列表渲染成结构化卡片网格, 插入对话区 (工具行下方, AI 回复上方)。
+// 每张卡片: 图标 + 标题链接(跳 Modrinth) + 描述 + 下载量 + 可展开截图(gallery)。
+function renderModCards(mods) {
+  const row = document.createElement("div");
+  row.className = "msg-row assistant";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "📦";
+  const grid = document.createElement("div");
+  grid.className = "msg assistant mod-cards";
+  for (const m of mods) {
+    const card = document.createElement("div");
+    card.className = "mod-card";
+    const iconHtml = m.icon_url
+      ? `<img class="mod-card-icon" src="${escapeHtml(m.icon_url)}" alt="" loading="lazy" onerror="this.className='mod-card-icon mod-card-icon-placeholder';this.src='';this.textContent='📦'">`
+      : `<span class="mod-card-icon mod-card-icon-placeholder">📦</span>`;
+    const url = m.url || ("https://modrinth.com/mod/" + m.slug);
+    card.innerHTML =
+      `<div class="mod-card-head">${iconHtml}` +
+      `<div class="mod-card-text">` +
+      `<a class="mod-card-name" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(m.title)}</a>` +
+      `<span class="pmeta">${escapeHtml(m.slug)}</span></div></div>` +
+      `<div class="mod-card-desc">${escapeHtml(m.description || "")}</div>` +
+      `<div class="mod-card-meta">${fmtDownloads(m.downloads || 0)} 下载` +
+      (m.categories?.length ? ` · ${escapeHtml(m.categories.slice(0, 4).join(", "))}` : "") +
+      (m.taste_score != null ? ` · <span class="tscore">口味 ${m.taste_score.toFixed(1)}</span>` : "") +
+      `</div>`;
+    // gallery 截图: 有图时加"📷 截图"按钮, 点击切换展开
+    if (Array.isArray(m.gallery) && m.gallery.length) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "mod-card-gallery-btn";
+      btn.textContent = `📷 ${m.gallery.length} 张截图`;
+      const gallery = document.createElement("div");
+      gallery.className = "mod-card-gallery hidden";
+      for (const g of m.gallery) {
+        const img = document.createElement("img");
+        img.src = g;
+        img.loading = "lazy";
+        img.alt = "";
+        img.onclick = () => window.open(g, "_blank");
+        gallery.appendChild(img);
+      }
+      btn.onclick = () => {
+        gallery.classList.toggle("hidden");
+        btn.textContent = gallery.classList.contains("hidden")
+          ? `📷 ${m.gallery.length} 张截图`
+          : "收起截图";
+      };
+      card.appendChild(btn);
+      card.appendChild(gallery);
+    }
+    grid.appendChild(card);
+  }
+  row.append(avatar, grid);
+  DOM.messages.appendChild(row);
+  scrollBottom();
+}
+
 function handleEvent(ev, pending, progress, thinking) {
   switch (ev.type) {
     case "tool_call":
@@ -741,6 +813,10 @@ function handleEvent(ev, pending, progress, thinking) {
         t.el.textContent = `⚙ ${ev.name} ${ev.ok ? "完成" : "失败"}`;
       }
       clearProgress(progress);
+      // 工具返回数据含 mod 列表时, 渲染结构化卡片 (图标+链接+截图) 插入对话区,
+      // 让对话栏的 mod 也可点击跳转、看图片, 而非只有 AI 纯文字描述
+      const mods = extractMods(ev.result);
+      if (mods) renderModCards(mods);
       // 工具结果要再交给 LLM 分析, 又进入思考空窗期
       showThinking(thinking);
       break;

@@ -61,7 +61,7 @@ impl super::ToolRegistry {
         let take = a.count.unwrap_or(5).clamp(1, 10) as usize;
         let picked: Vec<_> = ranked.into_iter().take(take).collect();
 
-        // 并发补查每个 mod 的 project 拿 icon_url (拼官网链接无需请求, 由 slug 直接构造)。
+        // 并发补查每个 mod 的 project 拿 icon_url + gallery 截图 (拼官网链接无需请求, 由 slug 直接构造)。
         // 最多 10 个, 走信号量限流, 1-2 批完成。图标缺失时回退空串, 前端用占位。
         let mut set = tokio::task::JoinSet::new();
         for s in &picked {
@@ -72,16 +72,20 @@ impl super::ToolRegistry {
                 (slug, p)
             });
         }
-        let mut icons: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut meta: std::collections::HashMap<String, (String, Vec<String>)> =
+            std::collections::HashMap::new();
         while let Some(res) = set.join_next().await {
             if let Ok((slug, Ok(p))) = res {
-                icons.insert(slug, p.icon_url);
+                // gallery 取前 3 张 (避免数据过大, 对话卡片点击展开查看)
+                let gallery: Vec<String> = p.gallery.into_iter().take(3).collect();
+                meta.insert(slug, (p.icon_url, gallery));
             }
         }
 
         let mods: Vec<serde_json::Value> = picked
             .into_iter()
             .map(|s| {
+                let (icon_url, gallery) = meta.get(&s.hit.slug).cloned().unwrap_or_default();
                 json!({
                     "slug": s.hit.slug,
                     "title": s.hit.title,
@@ -89,8 +93,9 @@ impl super::ToolRegistry {
                     "downloads": s.hit.downloads,
                     "categories": s.hit.display_categories,
                     "taste_score": s.score,
-                    "icon_url": icons.get(&s.hit.slug).cloned().unwrap_or_default(),
+                    "icon_url": icon_url,
                     "url": format!("https://modrinth.com/mod/{}", s.hit.slug),
+                    "gallery": gallery,
                 })
             })
             .collect();
