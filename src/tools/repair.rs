@@ -32,24 +32,7 @@ impl super::ToolRegistry {
             bail!("add_slugs 为空");
         }
         let safe = a.pack_name.to_lowercase();
-        let pack_path = std::fs::read_dir(&self.download_dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "mrpack"))
-            .find(|p| {
-                let stem = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                stem.contains(&safe) || safe.contains(&stem)
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "在 {} 中找不到整合包 '{}'",
-                    self.download_dir.display(),
-                    a.pack_name
-                )
-            })?;
+        let pack_path = resolve_pack_path(&self.download_dir, &a.pack_name, &safe)?;
 
         let pack_file = std::fs::File::open(&pack_path)?;
         let mut archive = zip::ZipArchive::new(pack_file)?;
@@ -255,5 +238,109 @@ impl super::ToolRegistry {
             "total_mods": total_mods,
             "note": if added.is_empty() { "无新增, 所需 mod 已在包中" } else { "已补入, 请用户重新拖入启动器安装" },
         }))
+    }
+}
+
+/// 在 download_dir 找指定名称的 .mrpack: 精确匹配优先, 模糊兜底, 多义报错。
+/// 抽成独立函数便于单测三种情况 (精确/模糊单中/多义)。
+fn resolve_pack_path(
+    dir: &std::path::Path,
+    pack_name: &str,
+    safe_lower: &str,
+) -> Result<std::path::PathBuf> {
+    let candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "mrpack"))
+        .collect();
+    let stem_lower = |p: &std::path::Path| {
+        p.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+    };
+    // 1. 精确匹配 (大小写不敏感)
+    if let Some(p) = candidates.iter().find(|p| stem_lower(p) == safe_lower) {
+        return Ok(p.clone());
+    }
+    // 2. 模糊兜底: stem 含包名 (单向)
+    let fuzzy: Vec<_> = candidates
+        .iter()
+        .filter(|p| stem_lower(p).contains(safe_lower))
+        .collect();
+    match fuzzy.len() {
+        0 => bail!("在 {} 中找不到整合包 '{}'", dir.display(), pack_name),
+        1 => Ok(fuzzy[0].clone()),
+        _ => {
+            let names: Vec<String> = fuzzy
+                .iter()
+                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+                .collect();
+            bail!(
+                "整合包 '{}' 模糊匹配到多个, 请指定完整名称: {}",
+                pack_name,
+                names.join(", ")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(dir: &std::path::Path, name: &str) {
+        std::fs::File::create(dir.join(name)).unwrap();
+    }
+
+    #[test]
+    fn resolve_pack_exact_match_preferred() {
+        let dir = std::env::temp_dir().join(format!("rustagent-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir, "MyPack.mrpack");
+        touch(&dir, "MyPack-old.mrpack");
+        // 精确匹配优先于模糊
+        let p = resolve_pack_path(&dir, "MyPack", "mypack").unwrap();
+        assert_eq!(p.file_name().unwrap(), "MyPack.mrpack");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_pack_fuzzy_single_match_ok() {
+        let dir = std::env::temp_dir().join(format!("rustagent-repair-fz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir, "adventure-pack.mrpack");
+        // 无精确, 单一模糊命中
+        let p = resolve_pack_path(&dir, "adventure", "adventure").unwrap();
+        assert_eq!(p.file_name().unwrap(), "adventure-pack.mrpack");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_pack_ambiguous_fuzzy_errors() {
+        let dir = std::env::temp_dir().join(format!("rustagent-repair-amb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir, "test-pack.mrpack");
+        touch(&dir, "test-v2.mrpack");
+        // 多个模糊匹配: 应报错而非猜
+        let err = resolve_pack_path(&dir, "test", "test").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("多个"), "应报多义错误, 实际: {msg}");
+        assert!(msg.contains("test-pack"));
+        assert!(msg.contains("test-v2"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_pack_not_found_errors() {
+        let dir = std::env::temp_dir().join(format!("rustagent-repair-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir, "other.mrpack");
+        let err = resolve_pack_path(&dir, "missing", "missing").unwrap_err();
+        assert!(format!("{err:#}").contains("找不到"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
