@@ -536,7 +536,7 @@ html { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
   border: 1px solid var(--border);
   color: var(--text-dim);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 .chip:hover {
   color: var(--text);
@@ -602,7 +602,7 @@ html { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
   border: none;
   border-radius: 7px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .seg-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
 .seg-btn.active {
@@ -726,7 +726,7 @@ button {
   padding: 7px 12px;
   font-size: 12px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 button:hover { border-color: rgba(109, 141, 255, 0.55); color: var(--accent-bright); background: var(--accent-soft); }
 
