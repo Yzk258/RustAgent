@@ -203,7 +203,7 @@ impl CfClient {
             if status.is_success() {
                 return serde_json::from_str(&body).context("解析 cfwidget 响应失败");
             }
-            last = format!("{status}: {}", &body[..body.len().min(120)]);
+            last = format!("{status}: {}", truncate_chars(&body, 120));
             // 202/429 = 排队/限流可重试, 其余 (404 等) 直接放弃
             if status.as_u16() != 202 && status.as_u16() != 429 {
                 break;
@@ -301,6 +301,19 @@ impl CfClient {
     }
 }
 
+/// 按 UTF-8 字符边界安全截断字符串到最多 max 字节, 避免切到多字节字符中间导致 panic。
+/// 原 body[..body.len().min(120)] 在错误页含中文/emoji 时会 panic (字节切片非字符边界)。
+fn truncate_chars(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +369,19 @@ mod tests {
             cdn_url(8792636, "b.jar"),
             "https://mediafilez.forgecdn.net/files/8792/636/b.jar"
         );
+    }
+
+    #[test]
+    fn truncate_chars_safe_on_multibyte() {
+        // ASCII 原样
+        assert_eq!(truncate_chars("hello world", 5), "hello");
+        // 短串不截断
+        assert_eq!(truncate_chars("hi", 120), "hi");
+        // 中文每字 3 字节: 120 字节边界会落在某字中间, 应回退到字符边界不 panic
+        let long = "错误".repeat(50); // 300 字节
+        let t = truncate_chars(&long, 120);
+        assert!(t.len() <= 120 && t.len() % 3 == 0, "应按字符边界截断, 实际 len {}", t.len());
+        assert!(t.chars().all(|c| c == '错' || c == '误'), "不应有残缺字符");
     }
 
     fn write_jar(path: &Path, entries: &[(&str, &str)]) {
