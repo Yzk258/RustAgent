@@ -88,12 +88,22 @@ function escapeHtml(s) {
 }
 
 // markdown 渲染: marked 解析 (GFM 表格 + 单换行成 <br>), 再经 DOM 净化 ——
-// 剥离原始 HTML 标签与非 http(s) 链接、on* 属性, 防止 LLM 输出注入脚本
+// 剥离原始 HTML 标签与非 http(s) 链接、危险属性, 防止 LLM 输出注入脚本。
+// 属性用白名单 (而非黑名单删 on*): 只保留已知安全属性, 移除 style/javascript: 等
+// —— style 可做 UI 欺骗 (position:fixed 覆盖整页), 黑名单会漏掉新出现的危险属性。
 const MD_TAGS = new Set([
   "A", "B", "STRONG", "I", "EM", "S", "DEL", "CODE", "PRE", "UL", "OL", "LI",
   "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6", "P", "BR", "HR",
   "TABLE", "THEAD", "TBODY", "TFOOT", "TR", "TH", "TD", "SPAN", "INPUT",
 ]);
+// 各标签允许保留的属性白名单 (其余一律移除)。INPUT 仅为 GFM task list 复选框保留
+// disabled/checked/type, 防止被滥用构造可交互表单。
+const MD_ATTRS = {
+  A: new Set(["href", "title"]),
+  INPUT: new Set(["type", "checked", "disabled"]),
+  CODE: new Set(["class"]),
+  SPAN: new Set(["class"]),
+};
 
 function renderText(s) {
   if (!window.marked) return escapeHtml(s); // 库加载失败时退回纯文本
@@ -104,8 +114,12 @@ function renderText(s) {
       el.replaceWith(document.createTextNode(el.textContent));
       continue;
     }
+    // 属性白名单: 只保留该标签允许的属性, 移除 style/on*/javascript: 等一切危险属性
+    const allowed = MD_ATTRS[el.tagName];
     for (const attr of [...el.attributes]) {
-      if (attr.name.toLowerCase().startsWith("on")) el.removeAttribute(attr.name);
+      if (!allowed || !allowed.has(attr.name.toLowerCase())) {
+        el.removeAttribute(attr.name);
+      }
     }
     if (el.tagName === "A") {
       if (/^https?:/i.test(el.getAttribute("href") || "")) {
@@ -114,6 +128,10 @@ function renderText(s) {
       } else {
         el.replaceWith(...el.childNodes);
       }
+    }
+    if (el.tagName === "INPUT") {
+      // GFM task list 复选框: 强制 disabled, 防止可交互 input 被滥用
+      el.setAttribute("disabled", "");
     }
   }
   // 表格横向可滚动; 代码块挂复制按钮 (点击处理在 messages 上统一委托)
