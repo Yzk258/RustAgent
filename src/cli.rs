@@ -217,7 +217,7 @@ pub async fn repl(cfg: &Config) -> Result<()> {
             "" => continue,
             "/quit" => break,
             "/new" => {
-                *agent.lock().await = new_agent(cfg, Arc::new(AtomicBool::new(false))).await?;
+                *agent.lock().await = new_agent(cfg, interrupt.clone()).await?;
                 println!("{}", paint(GREEN, "✓ 已开启新会话"));
             }
             "/save" => {
@@ -356,8 +356,16 @@ pub async fn repl(cfg: &Config) -> Result<()> {
                         }
                     }
                     _ = tokio::signal::ctrl_c() => {
-                        turn.abort();
-                        println!("\n{}", paint(YELLOW, "⏸ 已打断当前任务"));
+                        // 协作式软中断 (与 Web UI 同机制): 置位 interrupt 标记,
+                        // run_turn_with 在安全点检查并 abort_turn 收尾 (补占位 tool 消息,
+                        // 保持序列合法), 打印 "已打断" 由其发出的 Reply 事件承担。
+                        // 原 turn.abort() 是硬取消, 可能在 LLM 调用中途留下半合法 messages。
+                        interrupt.store(true, Ordering::Relaxed);
+                        // 等 run_turn_with 在安全点自然收尾 (LLM 期间有 wait_interrupt 竞争,
+                        // 工具间隙有 check_interrupt/await_interrupt, 秒级响应)
+                        if let Err(e) = turn.await {
+                            eprintln!("\n{}", paint(RED, &format!("✗ 任务异常: {e}")));
+                        }
                     }
                 }
                 // 每轮对话默认自动保存 (打断/出错也保留已有内容), 同一会话覆盖写同一文件
