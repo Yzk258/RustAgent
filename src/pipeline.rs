@@ -84,7 +84,9 @@ pub async fn dependency_closure(
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut frontier: Vec<String> = seeds.to_vec();
 
-    for _pass in 0..4 {
+    // 依赖闭包最多 8 轮 (seen_slugs 去重防环保证收敛; 4 轮对绝大多数 mod 够,
+    // 8 轮覆盖更深的依赖链, 如某些大型 tech mod 的多层前置)
+    for _pass in 0..8 {
         if frontier.is_empty() {
             break;
         }

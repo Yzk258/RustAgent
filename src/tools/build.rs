@@ -234,8 +234,11 @@ impl super::ToolRegistry {
         let mut done = 0u64;
         for outcome in collected {
             done += 1;
+            let slug = match &outcome {
+                CollectOutcome::Mod { slug, .. } | CollectOutcome::Conflict { slug, .. } => slug,
+            };
             ctx.report(
-                format!("正在收集 mod ({}/{})", done, total),
+                format!("正在收集 mod {slug} ({}/{})", done, total),
                 Some(done),
                 Some(total as u64),
             );
