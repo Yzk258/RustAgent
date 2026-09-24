@@ -115,6 +115,11 @@
           <span class="hint">预设后直接执行, 不再追问</span>
         </div>
       </form>
+      <div id="trial-hint" class="trial-hint hidden" role="status">
+        <span class="trial-icon">🔬</span>
+        <span>试用模式: <b class="trial-tool"></b> — 输入提示词后发送即触发工具演示</span>
+        <button type="button" id="btn-trial-cancel" class="trial-cancel">✕ 退出</button>
+      </div>
       <form id="inputbar">
         <textarea id="input" rows="1"
           placeholder="描述你想要的整合包… (Enter 发送, Shift+Enter 换行)"></textarea>

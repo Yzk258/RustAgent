@@ -15,8 +15,10 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::AppState;
 use crate::agent::{new_agent, AgentEvent};
+use crate::llm::{LlmClient, Message};
 use crate::prelude::*;
 use crate::storage::history;
+use crate::tools::TaskCtx;
 
 /// 所有 handler 共享的状态提取器类型
 type SharedState = State<std::sync::Arc<AppState>>;
@@ -571,4 +573,149 @@ pub async fn settings_update(
     }
     *state.cfg.write().await = cfg;
     Json(json!({ "ok": true, "message": message, "model": llm.model }))
+}
+
+// ---------------------------------------------------------------------------
+// 工具试用接口: 直接执行工具拿标准输出 + AI 流式分析 (不经过对话循环)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct TrialRequest {
+    pub tool: String,
+    /// 用户提示词: search_mods 时作为查询词; 其余工具仅作为给 AI 分析的语境
+    pub prompt: String,
+    #[serde(default)]
+    pub game_version: Option<String>,
+    #[serde(default)]
+    pub loader: Option<String>,
+}
+
+/// 按工具名构造演示参数。仅对可安全演示的工具开放 (无副作用 + 参数可由预设栏推断):
+/// get_user_profile / recommend_new_mods / search_mods。
+/// build_modpack (下载写盘) / record_feedback (改库) / repair_pack (改盘) 不支持试用。
+fn trial_args(req: &TrialRequest) -> Result<String> {
+    match req.tool.as_str() {
+        "get_user_profile" => Ok(serde_json::to_string(&serde_json::Value::Object(
+            serde_json::Map::new(),
+        ))?),
+        "recommend_new_mods" => {
+            let gv = req
+                .game_version
+                .as_deref()
+                .ok_or_else(|| anyhow!("recommend_new_mods 试用需先在预设栏选 MC 版本"))?;
+            let loader = req.loader.as_deref().unwrap_or("");
+            Ok(serde_json::to_string(&json!({
+                "game_version": gv,
+                "loader": loader,
+                "count": 5
+            }))?)
+        }
+        "search_mods" => {
+            let gv = req
+                .game_version
+                .as_deref()
+                .ok_or_else(|| anyhow!("search_mods 试用需先在预设栏选 MC 版本"))?;
+            let loader = req.loader.as_deref().unwrap_or("");
+            // 提示词作为查询词 (会经 pipeline::translate_keyword 转英文)
+            Ok(serde_json::to_string(&json!({
+                "query": req.prompt,
+                "game_version": gv,
+                "loader": loader,
+                "limit": 8
+            }))?)
+        }
+        other => bail!(
+            "工具 '{other}' 暂不支持试用 (仅支持 get_user_profile / recommend_new_mods / search_mods; \
+             build_modpack / record_feedback / repair_pack 有副作用或需复杂参数, 不开放试用)"
+        ),
+    }
+}
+
+/// 工具试用: NDJSON 流式返回。
+///   {"type":"tool_output","name":"...","output":{...}}   工具原始标准输出
+///   {"type":"analysis_delta","text":"..."}               AI 分析增量 (打字机)
+///   {"type":"error","message":"..."}                      执行/分析出错
+///   {"type":"done"}                                       结束
+pub async fn tool_trial(
+    State(state): SharedState,
+    Json(req): Json<TrialRequest>,
+) -> Response {
+    let (out_tx, out_rx) = unbounded_channel::<Result<Bytes, Infallible>>();
+    let cfg = state.cfg.read().await.clone();
+    let tools = state.tools.clone();
+
+    tokio::spawn(async move {
+        let send_line = |v: Value| {
+            let _ = out_tx.send(Ok(Bytes::from(format!("{v}\n"))));
+        };
+        let send_err = |msg: String| {
+            send_line(json!({ "type": "error", "message": msg }));
+        };
+
+        // 1. 构造参数并执行工具
+        let args = match trial_args(&req) {
+            Ok(a) => a,
+            Err(e) => {
+                send_err(format!("{e:#}"));
+                return;
+            }
+        };
+        let result = match tools.execute(&req.tool, &args, &TaskCtx::none()).await {
+            Ok(v) => v,
+            Err(e) => {
+                send_err(format!("工具执行失败: {e:#}"));
+                return;
+            }
+        };
+        // 先把工具标准输出推给前端
+        send_line(json!({ "type": "tool_output", "name": &req.tool, "output": result }));
+
+        // 2. LLM 流式分析: 把工具结果 + 用户提示词交给 LLM 解读
+        let llm = match LlmClient::new(cfg.llm.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                send_err(format!("LLM 客户端初始化失败: {e:#}"));
+                return;
+            }
+        };
+        let analysis_prompt = format!(
+            "你正在演示 RustAgent 的「{}」工具。用户的提示词是：「{}」。\n\
+             工具刚执行完毕, 返回的原始数据如下 (JSON):\n{}\n\n\
+             请用简洁的中文向用户解读这个结果: 这个工具做了什么、返回数据各字段的含义、\
+             对用户的实际价值。如果有值得注意的项 (如某标签权重高/某 mod 下载量大) 主动点出。\
+             不要复述原始 JSON, 用人话讲清楚。",
+            req.tool, req.prompt, result
+        );
+        let fwd_tx = out_tx.clone();
+        let res = llm
+            .chat_stream(
+                vec![Message::system("你是 RustAgent 的工具演示助手, 负责向用户解读工具返回的数据。用中文, 简洁有重点。"),
+                     Message::user(&analysis_prompt)],
+                None,
+                |delta| {
+                    let _ = fwd_tx.send(Ok(Bytes::from(
+                        format!(r#"{{"type":"analysis_delta","text":{}}}"#, serde_json::to_string(delta).unwrap_or_default())
+                    )));
+                },
+                |_| {},
+            )
+            .await;
+        match res {
+            Ok(_) => {
+                let _ = out_tx.send(Ok(Bytes::from(
+                    r#"{"type":"done"}"#.to_string()
+                )));
+            }
+            Err(e) => {
+                send_err(format!("AI 分析失败: {e:#}"));
+            }
+        }
+    });
+
+    let stream = UnboundedReceiverStream::new(out_rx);
+    Response::builder()
+        .header("content-type", "application/x-ndjson; charset=utf-8")
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(stream))
+        .unwrap()
 }

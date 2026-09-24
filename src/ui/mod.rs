@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::agent::{new_agent, Agent};
 use crate::config::Config;
 use crate::prelude::*;
+use crate::tools::ToolRegistry;
 
 /// 共享应用状态: Agent 加互斥锁串行化对话, 配置 RwLock 支持运行时热更新
 /// (设置窗口改模型等)。interrupt 是协作式打断标记 (打断按钮置位, agent 在安全点检查),
@@ -26,6 +27,9 @@ pub struct AppState {
     pub interrupt: Arc<AtomicBool>,
     /// Modrinth 客户端: 供"试试这个"推荐与反馈接口独立使用, 不持 agent 锁, 与对话流并行。
     pub modrinth: crate::providers::modrinth::ModrinthClient,
+    /// 独立工具注册表: 供 /api/tool/trial 试用接口直接执行工具 (不经过 agent 对话循环)。
+    /// 与 agent 内的 ToolRegistry 并列; 无状态, 互不影响。
+    pub tools: ToolRegistry,
     /// config.toml 路径 (设置写回用)
     pub config_path: String,
 }
@@ -45,11 +49,22 @@ pub async fn serve(cfg: Config, config_path: &str) -> Result<()> {
         new_agent(&cfg, interrupt.clone()).await?,
     ));
     let modrinth = crate::providers::modrinth::ModrinthClient::new()?;
+    let cf = cfg
+        .curseforge
+        .enabled
+        .then(crate::providers::curseforge::CfClient::new);
+    let tools = ToolRegistry::new(
+        modrinth.clone(),
+        cf,
+        &cfg.output.download_dir,
+        cfg.db_path(),
+    );
     let state = AppState {
         agent,
         cfg: Arc::new(tokio::sync::RwLock::new(cfg)),
         interrupt,
         modrinth,
+        tools,
         config_path: config_path.to_string(),
     };
 
@@ -104,8 +119,8 @@ fn router(state: AppState) -> Router {
             "/api/settings",
             get(api::settings).post(api::settings_update),
         )
-        // 聊天 (NDJSON 流式返回 Agent 事件)
-        .route("/api/chat", post(api::chat))
+        // 工具试用 (直接执行工具拿标准输出 + AI 流式分析, 不经过对话循环)
+        .route("/api/tool/trial", post(api::tool_trial))
         .route("/api/chat/interrupt", post(api::chat_interrupt))
         // 会话管理
         .route("/api/session/new", post(api::session_new))

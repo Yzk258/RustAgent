@@ -89,6 +89,9 @@ impl TaskCtx {
 /// 这两类是正确性需要, 不是用户主动扩包。设上限是为了考虑轻量化, 敬请谅解。
 const MAX_USER_MODS_PER_PACK: usize = 100;
 
+/// 工具注册表。加 Clone: /api/tool/trial 试用接口需独立持有一份 (与 agent 内的并列,
+/// 互不影响; ToolRegistry 无状态, clone 安全)。reqwest::Client 内部 Arc, clone 廉价。
+#[derive(Clone)]
 pub struct ToolRegistry {
     modrinth: ModrinthClient,
     /// CurseForge 点名客户端 (config.toml [curseforge] enabled 开启时才有)

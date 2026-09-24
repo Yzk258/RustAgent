@@ -158,6 +158,7 @@ pub fn read_depends(jar: &Path) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
+#[derive(Clone)]
 pub struct CfClient {
     http: reqwest::Client,
 }

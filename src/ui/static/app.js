@@ -11,7 +11,7 @@ const DOM = Object.fromEntries(
     "session-file", "session-list", "pack-dir", "pack-list", "tag-weights",
     "tool-list", "model-name", "ver", "status-dot", "status-text",
     "sel-version", "sel-loader", "sel-limit", "input-limit", "custom-limit-wrap",
-    "btn-rec", "rec-list", "rec-hint",
+    "btn-rec", "rec-list", "rec-hint", "trial-hint",
   ].map((id) => [id, $(id)])
 );
 
@@ -19,6 +19,7 @@ const state = {
   busy: false,
   presetKey: "rustagent-preset",
   limitCap: 20,
+  trialTool: null, // 试用模式: 当前选定的工具名 (null = 普通对话)
 };
 
 // 设置窗口字段 DOM 缓存: openSettings/saveSettings 反复用 $("set-xxx") 查询,
@@ -364,6 +365,9 @@ async function loadProfile() {
   } catch { /* ignore */ }
 }
 
+// 可试用工具 (无副作用 + 参数可由预设栏推断); 其余工具不显示试用按钮
+const TRIALABLE = new Set(["get_user_profile", "recommend_new_mods", "search_mods"]);
+
 async function loadTools() {
   try {
     const t = await API.get("/api/tools");
@@ -371,12 +375,47 @@ async function loadTools() {
     ul.innerHTML = "";
     for (const tool of t.tools) {
       const li = document.createElement("li");
-      li.innerHTML =
+      li.className = "tool-item";
+      const info = document.createElement("div");
+      info.innerHTML =
         `<span class="tname">${escapeHtml(tool.name)}</span><br>` +
         `<span class="tdesc">${escapeHtml(tool.description)}</span>`;
+      li.appendChild(info);
+      // 可试用的工具追加"试用"按钮, 点击进入试用模式
+      if (TRIALABLE.has(tool.name)) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "tool-trial-btn";
+        btn.textContent = "试用";
+        btn.addEventListener("click", () => startTrial(tool.name));
+        li.appendChild(btn);
+      }
       ul.appendChild(li);
     }
   } catch { /* ignore */ }
+}
+
+// 试用模式: 选定工具后, 输入框上方提示条 + 输入框聚焦, 发送时走 /api/tool/trial
+function startTrial(toolName) {
+  state.trialTool = toolName;
+  const hint = $("trial-hint");
+  hint.querySelector(".trial-tool").textContent = toolName;
+  hint.classList.remove("hidden");
+  // 给输入框预填一个示例提示词, 引导用户
+  const examples = {
+    get_user_profile: "查看一下我的画像",
+    recommend_new_mods: "给我推荐点新的",
+    search_mods: "找点性能优化 mod",
+  };
+  DOM.input.value = examples[toolName] || "";
+  autoGrow();
+  DOM.input.focus();
+  toast(`已进入试用模式: ${toolName}, 输入提示词后发送即触发演示`, false);
+}
+
+function exitTrial() {
+  state.trialTool = null;
+  $("trial-hint").classList.add("hidden");
 }
 
 async function loadPacks() {
@@ -494,6 +533,106 @@ function setBusy(b) {
   DOM["btn-stop"].classList.toggle("hidden", !b);
 }
 
+// 工具试用: POST /api/tool/trial, NDJSON 流式接收 tool_output + analysis_delta。
+// 渲染: 用户消息 → [工具输出折叠区块] → [AI 分析 markdown 气泡 (流式)]
+async function sendTrial(toolName, prompt) {
+  removeWelcome();
+  addMsg("user", escapeHtml(prompt));
+  // 工具调用行 (与正常对话一致的视觉)
+  const toolLine = addToolLine(toolName);
+  // 工具输出区块 (折叠, 展示原始 JSON)
+  const outputRow = document.createElement("div");
+  outputRow.className = "msg-row assistant";
+  const outputAvatar = document.createElement("div");
+  outputAvatar.className = "avatar";
+  outputAvatar.textContent = "⛏";
+  const outputDiv = document.createElement("div");
+  outputDiv.className = "msg assistant trial-output";
+  outputDiv.innerHTML = '<div class="trial-output-head">📋 工具标准输出</div><pre class="trial-output-json">等待执行…</pre>';
+  outputRow.append(outputAvatar, outputDiv);
+  DOM.messages.appendChild(outputRow);
+  const jsonEl = outputDiv.querySelector(".trial-output-json");
+  // AI 分析气泡 (流式)
+  let analysisEl = null;
+  let analysisText = "";
+  scrollBottom();
+
+  chatController = new AbortController();
+  try {
+    const res = await fetch("/api/tool/trial", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: chatController.signal,
+      body: JSON.stringify({
+        tool: toolName,
+        prompt,
+        game_version: DOM["sel-version"].value.trim() || undefined,
+        loader: DOM["sel-loader"].value || undefined,
+      }),
+    });
+    if (!res.ok || !res.body) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "tool_output") {
+          // 工具执行完成: 展示原始 JSON, 工具行标记完成
+          toolLine.classList.remove("pending");
+          toolLine.classList.add("ok");
+          toolLine.textContent = `⚙ ${ev.name} 完成`;
+          jsonEl.textContent = JSON.stringify(ev.output, null, 2);
+          outputDiv.querySelector(".trial-output-head").textContent = `📋 ${ev.name} 标准输出`;
+          scrollBottom();
+        } else if (ev.type === "analysis_delta") {
+          // AI 分析增量: 创建/追加分析气泡, 按帧渲染 markdown
+          if (!analysisEl) {
+            analysisEl = addMsg("assistant", "");
+          }
+          analysisText += ev.text;
+          queueTrialRender(analysisEl, analysisText);
+        } else if (ev.type === "error") {
+          hideThinking({ el: null, timer: null });
+          addMsg("error", escapeHtml(ev.message));
+        }
+        // done 类型: 流结束, 无额外处理
+      }
+    }
+  } catch (e) {
+    if (e.name === "AbortError") return;
+    addMsg("error", "试用请求失败: " + escapeHtml(e.message || e));
+    markOffline();
+  } finally {
+    chatController = null;
+    setBusy(false);
+    refreshSidebar();
+    DOM.input.focus();
+  }
+}
+
+// 试用 AI 分析的流式渲染 (复用 queueMdRender 的 rAF 批处理思路, 独立队列避免与对话冲突)
+let trialPaintQueued = false;
+function queueTrialRender(el, text) {
+  if (trialPaintQueued) return;
+  trialPaintQueued = true;
+  requestAnimationFrame(() => {
+    trialPaintQueued = false;
+    el.innerHTML = renderText(text);
+    scrollBottom();
+  });
+}
+
 async function send() {
   const input = DOM.input;
   const text = input.value.trim();
@@ -501,6 +640,13 @@ async function send() {
   input.value = "";
   autoGrow();
   setBusy(true);
+  // 试用模式: 走独立的 /api/tool/trial 流程 (工具标准输出 + AI 分析)
+  if (state.trialTool) {
+    const tool = state.trialTool;
+    exitTrial();
+    await sendTrial(tool, text);
+    return;
+  }
 
   addMsg("user", escapeHtml(text));
   const pending = []; // { name, el, done }; replyEl 属性 = 当前流式回复气泡 (本轮共用)
@@ -926,6 +1072,7 @@ $("btn-open-dir").addEventListener("click", async () => {
   }
 });
 $("btn-rec").addEventListener("click", loadRecommend);
+$("btn-trial-cancel").addEventListener("click", exitTrial);
 $("btn-settings").addEventListener("click", openSettings);
 $("btn-settings-close").addEventListener("click", closeSettings);
 $("btn-settings-cancel").addEventListener("click", closeSettings);
