@@ -123,7 +123,7 @@ pub async fn dependency_closure(
                             continue;
                         }
                     };
-                    let v = match versions.first() {
+                    let v = match crate::providers::modrinth::latest_version(versions) {
                         Some(v) => v,
                         None => {
                             conflicts.push(format!(

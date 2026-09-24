@@ -50,6 +50,48 @@ impl UserDatabase {
         self.feedback.push(record);
     }
 
+    /// 增量插入一条反馈 + 其标签 (单条 INSERT, 不删表不重建), 同时更新内存。
+    /// record_feedback 用此替代全量 save (原 load 全表 -> delete 全表 -> insert 全表),
+    /// 反馈条数越多收益越大 (全量写随反馈增长线性变慢)。
+    pub fn append_feedback(&mut self, record: FeedbackRecord) -> Result<()> {
+        let conn = open(&self.storage_path)?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO feedback (slug, verdict, game_version, loader, source, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![record.slug, record.verdict, record.game_version, record.loader, record.source, record.timestamp],
+        )?;
+        let id = tx.last_insert_rowid();
+        for tag in &record.tags {
+            tx.execute(
+                "INSERT INTO feedback_tags (feedback_id, tag) VALUES (?1, ?2)",
+                params![id, tag],
+            )?;
+        }
+        tx.commit()?;
+        self.feedback.push(record);
+        Ok(())
+    }
+
+    /// 增量插入一条组包记录 + 其 mod 列表, 同时更新内存。build_modpack 用此替代全量 save。
+    pub fn append_pack(&mut self, record: PackRecord) -> Result<()> {
+        let conn = open(&self.storage_path)?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO packs (name, created_at) VALUES (?1, ?2)",
+            params![record.name, record.created_at],
+        )?;
+        let id = tx.last_insert_rowid();
+        for (position, slug) in record.mod_slugs.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO pack_mods (pack_id, position, mod_slug) VALUES (?1, ?2, ?3)",
+                params![id, position as i64, slug],
+            )?;
+        }
+        tx.commit()?;
+        self.packs.push(record);
+        Ok(())
+    }
+
     pub fn rated_slugs(&self) -> HashSet<String> {
         self.feedback.iter().map(|f| f.slug.clone()).collect()
     }
@@ -232,5 +274,54 @@ mod tests {
         assert_eq!(loaded.packs[0].mod_slugs, vec!["sodium", "fabric-api"]);
         assert!(serde_json::to_value(&loaded.packs).is_ok());
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn append_feedback_and_pack_persist_incrementally() {
+        let path =
+            std::env::temp_dir().join(format!("rustagent-append-{}.db", std::process::id()));
+        let json_path = path.display().to_string();
+        let _ = std::fs::remove_file(&path);
+        let mut db = UserDatabase::load(&json_path);
+        db.append_feedback(FeedbackRecord {
+            slug: "sodium".into(),
+            verdict: "like".into(),
+            tags: vec!["optimization".into()],
+            game_version: "1.21.1".into(),
+            loader: "fabric".into(),
+            source: "test".into(),
+            timestamp: "now".into(),
+        })
+        .unwrap();
+        db.append_pack(PackRecord {
+            name: "p1".into(),
+            mod_slugs: vec!["sodium".into()],
+            created_at: "now".into(),
+        })
+        .unwrap();
+        // 内存即时更新
+        assert_eq!(db.feedback.len(), 1);
+        assert_eq!(db.packs.len(), 1);
+        // 重新 load 验证落盘正确 (含标签关联)
+        let reloaded = UserDatabase::load(&json_path);
+        assert_eq!(reloaded.feedback.len(), 1);
+        assert_eq!(reloaded.feedback[0].tags, vec!["optimization"]);
+        assert_eq!(reloaded.packs.len(), 1);
+        assert_eq!(reloaded.packs[0].mod_slugs, vec!["sodium"]);
+        // 再 append 一条, 验证是增量写 (不删旧记录)
+        let mut db = reloaded;
+        db.append_feedback(FeedbackRecord {
+            slug: "lithium".into(),
+            verdict: "like".into(),
+            tags: vec![],
+            game_version: "1.21.1".into(),
+            loader: "fabric".into(),
+            source: "test".into(),
+            timestamp: "now".into(),
+        })
+        .unwrap();
+        let reloaded2 = UserDatabase::load(&json_path);
+        assert_eq!(reloaded2.feedback.len(), 2, "增量写不应删除已有记录");
+        let _ = std::fs::remove_file(&path);
     }
 }

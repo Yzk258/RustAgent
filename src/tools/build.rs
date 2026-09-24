@@ -180,7 +180,7 @@ impl super::ToolRegistry {
                         };
                     }
                 };
-                let v = match versions.first() {
+                let v = match crate::providers::modrinth::latest_version(versions) {
                     Some(v) => v,
                     None => {
                         return CollectOutcome::Conflict {
@@ -321,12 +321,11 @@ impl super::ToolRegistry {
         let mut record_slugs = final_slugs.clone();
         record_slugs.extend(a.cf_mods.iter().map(|s| format!("cf:{s}")));
         let mut db = crate::storage::database::UserDatabase::load(&self.db_path);
-        db.packs.push(crate::storage::database::PackRecord {
+        let db_summary = match db.append_pack(crate::storage::database::PackRecord {
             name: a.name.clone(),
             mod_slugs: record_slugs,
             created_at: chrono::Local::now().to_rfc3339(),
-        });
-        let db_summary = match db.save() {
+        }) {
             Ok(()) => db.summary(),
             Err(_) => String::new(),
         };

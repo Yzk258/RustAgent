@@ -18,7 +18,7 @@ impl super::ToolRegistry {
             Ok(p) => crate::pipeline::taste_tags(&p.categories),
             Err(_) => Vec::new(),
         };
-        db.rate(crate::storage::database::FeedbackRecord {
+        db.append_feedback(crate::storage::database::FeedbackRecord {
             slug: a.slug.clone(),
             verdict: a.verdict.clone(),
             tags: tags.clone(),
@@ -26,8 +26,7 @@ impl super::ToolRegistry {
             loader: String::new(),
             source: "chat".to_string(),
             timestamp: chrono::Local::now().to_rfc3339(),
-        });
-        db.save()?;
+        })?;
         Ok(json!({
             "status": "已记录",
             "slug": a.slug,

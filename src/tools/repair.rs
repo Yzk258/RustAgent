@@ -3,6 +3,23 @@
 use super::*;
 use std::io::{Read as _, Write};
 
+/// 并发收集单个 mod 的结果 (repair 版): 成功含 file/env, 或记录一条冲突。
+/// 与 build.rs 的 CollectOutcome 同构; repair 需在主线程做 existing 查重,
+/// 故 file 在结果里原样返回, path 由主线程拼装 (查重发生在 join 之后)。
+enum RepairOutcome {
+    Mod {
+        slug: String,
+        version: String,
+        file: crate::providers::modrinth::VersionFile,
+        client_env: String,
+        server_env: String,
+    },
+    Conflict {
+        slug: String,
+        issue: String,
+    },
+}
+
 impl super::ToolRegistry {
     pub(super) async fn repair_pack(&self, args: &str, ctx: &TaskCtx) -> Result<serde_json::Value> {
         #[derive(Deserialize)]
@@ -92,54 +109,106 @@ impl super::ToolRegistry {
             .get_mut("files")
             .and_then(|f| f.as_array_mut())
             .ok_or_else(|| anyhow::anyhow!("索引 files 异常"))?;
+        // 并发收集 (跨 slug 并发 versions + project), 复用 build_modpack 的模式。
+        // 原串行版逐个请求; 并发后一批同时发出, repair 耗时大幅下降。
         let total = final_slugs.len();
-        for (i, slug) in final_slugs.iter().enumerate() {
-            ctx.check_interrupt()?;
+        let mut set = tokio::task::JoinSet::new();
+        for slug in final_slugs.iter() {
+            let client = self.modrinth.clone();
+            let slug = slug.clone();
+            let game_version = game_version.clone();
+            let loader = loader.to_string();
+            set.spawn(async move {
+                let versions = match client.versions(&slug, &game_version, &loader).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return RepairOutcome::Conflict {
+                            slug,
+                            issue: format!("{e:#}"),
+                        };
+                    }
+                };
+                let v = match crate::providers::modrinth::latest_version(versions) {
+                    Some(v) => v,
+                    None => {
+                        return RepairOutcome::Conflict {
+                            slug,
+                            issue: format!("无 {game_version}/{loader} 兼容版本"),
+                        };
+                    }
+                };
+                let file = match v
+                    .files
+                    .iter()
+                    .find(|f| f.primary)
+                    .or_else(|| v.files.first())
+                {
+                    Some(f) => f,
+                    None => {
+                        return RepairOutcome::Conflict {
+                            slug,
+                            issue: "兼容版本没有可下载文件".to_string(),
+                        };
+                    }
+                };
+                let (client_env, server_env) = match client.project(&slug).await {
+                    Ok(p) => (p.client_side, p.server_side),
+                    Err(_) => ("required".to_string(), "required".to_string()),
+                };
+                RepairOutcome::Mod {
+                    slug,
+                    version: v.version_number.clone(),
+                    file: file.clone(),
+                    client_env,
+                    server_env,
+                }
+            });
+        }
+        let mut collected: Vec<RepairOutcome> = Vec::with_capacity(total);
+        while !ctx.interrupted() {
+            match set.join_next().await {
+                Some(Ok(o)) => collected.push(o),
+                Some(Err(_)) => {}
+                None => break,
+            }
+        }
+        if ctx.interrupted() {
+            bail!(super::TOOL_INTERRUPTED);
+        }
+        let mut done = 0u64;
+        for outcome in collected {
+            done += 1;
             ctx.report(
-                format!("正在收集 mod {slug} ({}/{})", i + 1, total),
-                Some((i + 1) as u64),
+                format!("正在收集 mod ({}/{})", done, total),
+                Some(done),
                 Some(total as u64),
             );
-            let versions = match self.modrinth.versions(slug, &game_version, loader).await {
-                Ok(v) => v,
-                Err(e) => {
-                    conflicts.push(format!("{slug}: {e:#}"));
-                    continue;
+            match outcome {
+                RepairOutcome::Mod {
+                    slug,
+                    version,
+                    file,
+                    client_env,
+                    server_env,
+                } => {
+                    let path = format!("mods/{}", file.filename);
+                    if existing.contains(&path) {
+                        continue;
+                    }
+                    existing.insert(path.clone());
+                    added.push(json!({ "slug": slug, "version": version, "path": path }));
+                    files_arr.push(json!({
+                        "path": path,
+                        "hashes": { "sha1": file.hashes.sha1, "sha512": file.hashes.sha512 },
+                        "env": { "client": client_env, "server": server_env },
+                        "downloads": [file.url],
+                        "fileSize": file.size,
+                    }));
                 }
-            };
-            let v = match versions.first() {
-                Some(v) => v,
-                None => {
-                    conflicts.push(format!("{slug}: 无 {game_version}/{loader} 兼容版本"));
-                    continue;
+                RepairOutcome::Conflict { slug, issue } => {
+                    conflicts.push(format!("{slug}: {issue}"));
                 }
-            };
-            let Some(file) = v
-                .files
-                .iter()
-                .find(|f| f.primary)
-                .or_else(|| v.files.first())
-            else {
-                conflicts.push(format!("{slug}: 兼容版本没有可下载文件"));
-                continue;
-            };
-            let path = format!("mods/{}", file.filename);
-            if existing.contains(&path) {
-                continue;
             }
-            let (client_env, server_env) = match self.modrinth.project(slug).await {
-                Ok(p) => (p.client_side, p.server_side),
-                Err(_) => ("required".to_string(), "required".to_string()),
-            };
-            existing.insert(path.clone());
-            added.push(json!({ "slug": slug, "version": v.version_number, "path": path }));
-            files_arr.push(json!({
-                "path": path,
-                "hashes": { "sha1": file.hashes.sha1, "sha512": file.hashes.sha512 },
-                "env": { "client": client_env, "server": server_env },
-                "downloads": [file.url],
-                "fileSize": file.size,
-            }));
         }
 
         let total_mods = files_arr.len();

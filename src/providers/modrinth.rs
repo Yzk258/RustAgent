@@ -34,6 +34,10 @@ pub struct Project {
 #[derive(Deserialize)]
 pub struct ModVersion {
     pub version_number: String,
+    /// 发布时间 (ISO8601, 如 "2024-01-15T12:00:00.000Z")。用于跨版本按新旧排序,
+    /// 不依赖 Modrinth /version 端点默认返回顺序 (该顺序非 API 契约保证)。
+    #[serde(default)]
+    pub date_published: String,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
     #[serde(default)]
@@ -155,4 +159,14 @@ impl ModrinthClient {
             .json()
             .await?)
     }
+}
+
+/// 从版本列表挑 date_published 最新的。Modrinth /version 端点通常按日期降序返回,
+/// 但该顺序非 API 契约保证 (旧版/缓存/分页可能打乱); 显式按 date_published 取 max 更稳。
+/// ISO8601 字符串的字典序即时间序 (格式固定 YYYY-MM-DDTHH:MM:SS...Z)。
+/// build_modpack / repair_pack / dependency_closure 三处版本选择共用此函数。
+pub fn latest_version(versions: Vec<ModVersion>) -> Option<ModVersion> {
+    versions
+        .into_iter()
+        .max_by_key(|v| v.date_published.clone())
 }
