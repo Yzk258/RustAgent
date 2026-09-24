@@ -207,7 +207,7 @@ pub async fn feedback(State(state): SharedState, Json(req): Json<FeedbackRequest
         Ok(p) => crate::pipeline::taste_tags(&p.categories),
         Err(_) => Vec::new(),
     };
-    db.rate(crate::storage::database::FeedbackRecord {
+    match db.append_feedback(crate::storage::database::FeedbackRecord {
         slug: req.slug.clone(),
         verdict: req.verdict.clone(),
         tags: tags.clone(),
@@ -215,8 +215,7 @@ pub async fn feedback(State(state): SharedState, Json(req): Json<FeedbackRequest
         loader: String::new(),
         source: "web".to_string(),
         timestamp: chrono::Local::now().to_rfc3339(),
-    });
-    match db.save() {
+    }) {
         Ok(()) => Json(json!({
             "ok": true,
             "slug": req.slug,
