@@ -22,7 +22,7 @@ pub struct Hit {
     pub versions: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct Project {
     pub slug: String,
     pub client_side: String,

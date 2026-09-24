@@ -9,6 +9,16 @@ pub struct ScoredHit {
     pub score: f64,
 }
 
+/// 依赖闭包解析结果: 已解析的最新版本 + 该 mod 的环境端 (client/server side)。
+/// env 仅对依赖 mod 有 (通过 project(id) 解析时获得); 种子 mod 的 env 为 None,
+/// build/repair 收集时对 None 回退实时调 project()。versions 与 env 都缓存复用,
+/// 避免收集阶段对同一 slug 再调一次 versions + project (网络请求再减半)。
+#[derive(Clone)]
+pub struct ResolvedMod {
+    pub version: crate::providers::modrinth::ModVersion,
+    pub env: Option<(String, String)>,
+}
+
 pub fn rank(hits: Vec<Hit>, db: &UserDatabase) -> Vec<ScoredHit> {
     let weights = db.tag_weights();
     let mut scored: Vec<ScoredHit> = hits
@@ -80,16 +90,18 @@ pub async fn dependency_closure(
     Vec<String>,
     Vec<String>,
     Vec<String>,
-    std::collections::HashMap<String, crate::providers::modrinth::ModVersion>,
+    std::collections::HashMap<String, ResolvedMod>,
 )> {
     use std::collections::HashMap;
-    use crate::providers::modrinth::ModVersion;
     let mut all: Vec<String> = seeds.to_vec();
     let mut auto_added: Vec<String> = Vec::new();
     let mut conflicts: Vec<String> = Vec::new();
-    // 缓存每个 slug 已解析的最新版本 (含 files), 返回给 build/repair 复用,
-    // 避免它们对同一 slug 再调一次 versions() (减半网络请求)
-    let mut resolved: HashMap<String, ModVersion> = HashMap::new();
+    // 缓存每个 slug 已解析的最新版本 + env, 返回给 build/repair 复用,
+    // 避免它们对同一 slug 再调一次 versions() + project() (网络请求减半)
+    let mut resolved: HashMap<String, ResolvedMod> = HashMap::new();
+    // env 缓存: 依赖 mod 经 project(id) 解析时获得的 (client_side, server_side)。
+    // 该 slug 下一轮被 versions 解析时合并进 resolved.env。
+    let mut envs: HashMap<String, (String, String)> = HashMap::new();
     let mut seen_slugs: HashSet<String> = seeds.iter().cloned().collect();
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut frontier: Vec<String> = seeds.to_vec();
@@ -151,7 +163,13 @@ pub async fn dependency_closure(
                             continue;
                         }
                     };
-                    resolved.insert(slug.clone(), v.clone());
+                    resolved.insert(
+                        slug.clone(),
+                        ResolvedMod {
+                            version: v.clone(),
+                            env: envs.remove(&slug),
+                        },
+                    );
                     for dep in &v.dependencies {
                         if dep.dependency_type != "required" {
                             continue;
@@ -199,8 +217,15 @@ pub async fn dependency_closure(
                         seen_slugs.insert(project.slug.clone());
                         all.push(project.slug.clone());
                         auto_added.push(project.slug.clone());
-                        new_frontier.push(project.slug);
+                        new_frontier.push(project.slug.clone());
                     }
+                    // 缓存依赖 mod 的 env (project() 已返回 client/server side)。
+                    // 该 slug 的 version 要等下一轮 frontier 解析; 届时 versions 缓存时合并此 env。
+                    // build/repair 收集时若命中带 env 的 resolved, 不必再调 project()。
+                    envs.insert(
+                        project.slug.clone(),
+                        (project.client_side.clone(), project.server_side.clone()),
+                    );
                 }
                 Some(Err(_)) => {}
                 None => break,

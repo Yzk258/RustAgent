@@ -110,9 +110,9 @@ impl super::ToolRegistry {
             .get_mut("files")
             .and_then(|f| f.as_array_mut())
             .ok_or_else(|| anyhow::anyhow!("索引 files 异常"))?;
-        // 并发收集 (跨 slug 并发 versions + project), 复用 build_modpack 的模式。
-        // 优先复用 dependency_closure 已解析的 resolved 缓存 (省 versions 调用);
-        // repair 的 add_slugs 都是 dependency_closure 的种子, 缓存几乎全命中。
+        // 并发收集 (跨 slug 并发), 复用 build_modpack 的模式。
+        // 优先复用 dependency_closure 已解析的 resolved 缓存 (省 versions + project);
+        // repair 的 add_slugs 都是种子, version 全命中, env 需 fallback (种子无缓存 env)。
         let total = final_slugs.len();
         let resolved = std::sync::Arc::new(resolved);
         let mut set = tokio::task::JoinSet::new();
@@ -123,8 +123,8 @@ impl super::ToolRegistry {
             let loader = loader.to_string();
             let resolved = resolved.clone();
             set.spawn(async move {
-                let v = if let Some(cached) = resolved.get(&slug) {
-                    cached.clone()
+                let (v, cached_env) = if let Some(r) = resolved.get(&slug) {
+                    (r.version.clone(), r.env.clone())
                 } else {
                     let versions = match client.versions(&slug, &game_version, &loader).await {
                         Ok(v) => v,
@@ -136,7 +136,7 @@ impl super::ToolRegistry {
                         }
                     };
                     match crate::providers::modrinth::latest_version(versions) {
-                        Some(v) => v,
+                        Some(v) => (v, None),
                         None => {
                             return RepairOutcome::Conflict {
                                 slug,
@@ -159,9 +159,13 @@ impl super::ToolRegistry {
                         };
                     }
                 };
-                let (client_env, server_env) = match client.project(&slug).await {
-                    Ok(p) => (p.client_side, p.server_side),
-                    Err(_) => ("required".to_string(), "required".to_string()),
+                let (client_env, server_env) = if let Some(e) = cached_env {
+                    e
+                } else {
+                    match client.project(&slug).await {
+                        Ok(p) => (p.client_side, p.server_side),
+                        Err(_) => ("required".to_string(), "required".to_string()),
+                    }
                 };
                 RepairOutcome::Mod {
                     slug,

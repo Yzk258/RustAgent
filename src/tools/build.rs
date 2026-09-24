@@ -159,8 +159,8 @@ impl super::ToolRegistry {
 
         let total = final_slugs.len();
         // 并发收集: 跨 slug 并发。优先复用 dependency_closure 已解析的 resolved 缓存
-        // (省掉一次 versions() 调用); 仅 CF 补全的 extra slug 不在缓存里才回退实时请求。
-        // project() 取 env 仍需调 (resolved 不含 env), 但 versions 这大头已减半。
+        // (省掉 versions + project 两次调用); 仅 CF 补全的 extra slug 或种子(env None)
+        // 才回退实时调 project() 取 env。versions 全命中 (种子+依赖都被解析过)。
         let resolved = std::sync::Arc::new(resolved);
         let mut set = tokio::task::JoinSet::new();
         for slug in final_slugs.iter() {
@@ -171,8 +171,8 @@ impl super::ToolRegistry {
             let resolved = resolved.clone();
             set.spawn(async move {
                 // 缓存命中: 直接用已解析的最新版本 (dependency_closure 调过 versions)
-                let v = if let Some(cached) = resolved.get(&slug) {
-                    cached.clone()
+                let (v, cached_env) = if let Some(r) = resolved.get(&slug) {
+                    (r.version.clone(), r.env.clone())
                 } else {
                     let versions = match client
                         .versions(&slug, &game_version, &loader)
@@ -187,7 +187,7 @@ impl super::ToolRegistry {
                         }
                     };
                     match crate::providers::modrinth::latest_version(versions) {
-                        Some(v) => v,
+                        Some(v) => (v, None),
                         None => {
                             return CollectOutcome::Conflict {
                                 slug,
@@ -210,9 +210,14 @@ impl super::ToolRegistry {
                         };
                     }
                 };
-                let (client_env, server_env) = match client.project(&slug).await {
-                    Ok(p) => (p.client_side, p.server_side),
-                    Err(_) => ("required".to_string(), "required".to_string()),
+                // env 命中缓存则免调 project(); 否则实时取 (种子 mod 无缓存 env)
+                let (client_env, server_env) = if let Some(e) = cached_env {
+                    e
+                } else {
+                    match client.project(&slug).await {
+                        Ok(p) => (p.client_side, p.server_side),
+                        Err(_) => ("required".to_string(), "required".to_string()),
+                    }
                 };
                 CollectOutcome::Mod {
                     slug,
