@@ -552,9 +552,10 @@ async function sendTrial(toolName, prompt) {
   outputRow.append(outputAvatar, outputDiv);
   DOM.messages.appendChild(outputRow);
   const jsonEl = outputDiv.querySelector(".trial-output-json");
-  // AI 分析气泡 (流式)
+  // AI 分析气泡 (流式) + 思考提示 (工具输出后到 LLM 首 token 的空窗期提示)
   let analysisEl = null;
   let analysisText = "";
+  const thinking = { el: null, timer: null };
   scrollBottom();
 
   chatController = new AbortController();
@@ -595,15 +596,18 @@ async function sendTrial(toolName, prompt) {
           jsonEl.textContent = JSON.stringify(ev.output, null, 2);
           outputDiv.querySelector(".trial-output-head").textContent = `📋 ${ev.name} 标准输出`;
           scrollBottom();
+          // 工具输出后, LLM 开始分析 —— 立即显示"思考中", 告诉用户 AI 分析即将到来
+          showThinking(thinking);
         } else if (ev.type === "analysis_delta") {
-          // AI 分析增量: 创建/追加分析气泡, 按帧渲染 markdown
+          // AI 分析增量: 首个 token 到达, 清除思考提示, 创建分析气泡按帧渲染
+          hideThinking(thinking);
           if (!analysisEl) {
             analysisEl = addMsg("assistant", "");
           }
           analysisText += ev.text;
           queueTrialRender(analysisEl, analysisText);
         } else if (ev.type === "error") {
-          hideThinking({ el: null, timer: null });
+          hideThinking(thinking);
           addMsg("error", escapeHtml(ev.message));
         }
         // done 类型: 流结束, 无额外处理
@@ -615,6 +619,7 @@ async function sendTrial(toolName, prompt) {
     markOffline();
   } finally {
     chatController = null;
+    hideThinking(thinking);
     setBusy(false);
     refreshSidebar();
     DOM.input.focus();
