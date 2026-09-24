@@ -21,6 +21,16 @@ const state = {
   limitCap: 20,
 };
 
+// 设置窗口字段 DOM 缓存: openSettings/saveSettings 反复用 $("set-xxx") 查询,
+// 缓存一次避免每次 open/save 都走 getElementById (设置窗口频繁开关)。
+const SET = Object.fromEntries(
+  [
+    "set-model", "set-base-url", "set-api-key", "set-key-hint",
+    "set-ctx", "set-budget", "set-max-tools", "set-price-in", "set-price-out",
+    "set-thinking", "set-cf",
+  ].map((id) => [id, $(id)])
+);
+
 // 当前对话轮的 fetch 控制器: 切换会话时用它丢弃旧轮的流式输出
 let chatController = null;
 
@@ -425,20 +435,26 @@ async function loadRecommend() {
   }
 }
 
-// 点 👍/👎 即写库 (不经过 LLM, 不阻塞对话), 成功后标记该项并刷新统计
+// 点 👍/👎 即写库 (不经过 LLM, 不阻塞对话), 成功后标记该项并刷新统计。
+// 防抖: 点击即禁用两个按钮, 请求完成才恢复 (失败) 或保持禁用 (成功),
+// 避免首次请求未返回前连点发多个相同请求。
 async function rateRec(slug, verdict, item, btn) {
+  const btns = item.querySelectorAll(".rec-btns button");
+  btns.forEach((b) => (b.disabled = true));
   try {
     const r = await API.post("/api/feedback", { slug, verdict });
     toast(r.ok ? `已记录 ${verdict === "like" ? "喜欢" : "不喜欢"} ${slug}` : (r.message || "失败"), !r.ok);
-    if (!r.ok) return;
+    if (!r.ok) {
+      btns.forEach((b) => (b.disabled = false)); // 失败恢复可点
+      return;
+    }
     item.classList.add("rated");
-    // 该项两个按钮都禁用, 当前操作高亮
-    item.querySelectorAll(".rec-btns button").forEach((b) => (b.disabled = true));
-    btn.classList.add(verdict === "like" ? "liked" : "disliked");
+    btn.classList.add(verdict === "like" ? "liked" : "disliked"); // 成功保持禁用 + 高亮
     // 反馈改变了口味数据, 刷新统计与标签权重
     loadProfile();
     loadInfo();
   } catch {
+    btns.forEach((b) => (b.disabled = false)); // 网络失败恢复可点
     toast("请求失败, 请检查服务器连接!", true);
   }
 }
@@ -683,19 +699,19 @@ async function openSettings() {
   $("settings-modal").classList.remove("hidden");
   try {
     const s = await API.get("/api/settings");
-    $("set-model").value = s.model;
-    $("set-base-url").value = s.base_url;
-    $("set-api-key").value = "";
-    $("set-key-hint").textContent = s.api_key_set
+    SET["set-model"].value = s.model;
+    SET["set-base-url"].value = s.base_url;
+    SET["set-api-key"].value = "";
+    SET["set-key-hint"].textContent = s.api_key_set
       ? `留空保持不变 (已设置 ${s.api_key_masked})`
       : "尚未设置";
-    $("set-ctx").value = s.context_length;
-    $("set-budget").value = s.token_budget;
-    $("set-max-tools").value = s.max_tool_iterations;
-    $("set-price-in").value = s.price_input_per_m;
-    $("set-price-out").value = s.price_output_per_m;
-    $("set-thinking").value = s.thinking || "";
-    $("set-cf").checked = !!s.curseforge_enabled;
+    SET["set-ctx"].value = s.context_length;
+    SET["set-budget"].value = s.token_budget;
+    SET["set-max-tools"].value = s.max_tool_iterations;
+    SET["set-price-in"].value = s.price_input_per_m;
+    SET["set-price-out"].value = s.price_output_per_m;
+    SET["set-thinking"].value = s.thinking || "";
+    SET["set-cf"].checked = !!s.curseforge_enabled;
   } catch {
     toast("读取设置失败", true);
   }
@@ -712,17 +728,17 @@ async function saveSettings(e) {
     return;
   }
   const body = {
-    model: $("set-model").value.trim(),
-    base_url: $("set-base-url").value.trim(),
-    context_length: parseInt($("set-ctx").value, 10),
-    token_budget: parseInt($("set-budget").value, 10),
-    max_tool_iterations: parseInt($("set-max-tools").value, 10),
-    price_input_per_m: parseFloat($("set-price-in").value),
-    price_output_per_m: parseFloat($("set-price-out").value),
-    thinking: $("set-thinking").value.trim(),
-    curseforge_enabled: $("set-cf").checked,
+    model: SET["set-model"].value.trim(),
+    base_url: SET["set-base-url"].value.trim(),
+    context_length: parseInt(SET["set-ctx"].value, 10),
+    token_budget: parseInt(SET["set-budget"].value, 10),
+    max_tool_iterations: parseInt(SET["set-max-tools"].value, 10),
+    price_input_per_m: parseFloat(SET["set-price-in"].value),
+    price_output_per_m: parseFloat(SET["set-price-out"].value),
+    thinking: SET["set-thinking"].value.trim(),
+    curseforge_enabled: SET["set-cf"].checked,
   };
-  const key = $("set-api-key").value.trim();
+  const key = SET["set-api-key"].value.trim();
   if (key) body.api_key = key;
   // 空数字字段不发送 (保持原值), 避免 NaN 序列化成 null
   for (const k of ["context_length", "token_budget", "max_tool_iterations", "price_input_per_m", "price_output_per_m"]) {
@@ -815,10 +831,18 @@ function syncLoaderSeg() {
 }
 
 /* ---------- 输入框 ---------- */
+// autoGrow 用 rAF 节流: input 事件高频触发, 每次设 height:auto 再读 scrollHeight
+// 触发强制重排, 长文本输入卡顿。rAF 合并到一帧只重排一次。
+let growQueued = false;
 function autoGrow() {
-  const input = $("input");
-  input.style.height = "auto";
-  input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  if (growQueued) return;
+  growQueued = true;
+  requestAnimationFrame(() => {
+    growQueued = false;
+    const input = $("input");
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  });
 }
 
 /* ---------- 事件绑定与启动 ---------- */
