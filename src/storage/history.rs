@@ -71,10 +71,12 @@ pub fn auto_save(agent: &mut Agent, data_dir: &str) -> Result<String> {
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
         agent.session_file = Some(format!("{}/auto-{ts}.json", sessions_dir(data_dir)));
     }
-    let path = agent
-        .session_file
-        .clone()
-        .expect("session_file 已在上一步赋值");
+    // session_file 在上一步已保证为 Some; clone 后用 unwrap_or 兜底 (逻辑不可达,
+    // 但避免 expect 在生产路径留下 panic 隐患, 兜底回退到按当前时间新建)
+    let path = agent.session_file.clone().unwrap_or_else(|| {
+        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        format!("{}/auto-{ts}.json", sessions_dir(data_dir))
+    });
     write_to(agent, &path)?;
     Ok(path)
 }
