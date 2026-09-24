@@ -69,18 +69,28 @@ pub struct Hashes {
 /// reqwest::Client 内部是 Arc, clone 廉价且线程安全。
 /// 加 Clone 是为了在并发组包时每个 spawn 的任务持有一份 owned 客户端,
 /// 避免借用生命周期冲突 (tokio::task::JoinSet::spawn 要求 'static)。
+/// sem: 并发限流信号量 (clone 共享同一 Arc), 防止组包时瞬间上百请求触发 Modrinth 限流。
 #[derive(Clone)]
 pub struct ModrinthClient {
     http: reqwest::Client,
+    sem: Arc<tokio::sync::Semaphore>,
 }
+
+/// Modrinth API 最大并发请求数。Modrinth 限流 300 req/s (按 IP), 全并发上百连接
+/// 既不礼貌也易被边缘限流, 12 是经验平衡值 (组包几十请求约 2-3 批, 1-2 秒完成)。
+const MAX_MODRINTH_CONCURRENCY: usize = 12;
 
 impl ModrinthClient {
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .context("初始化 Modrinth 客户端失败")?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            sem: Arc::new(tokio::sync::Semaphore::new(MAX_MODRINTH_CONCURRENCY)),
+        })
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -106,6 +116,11 @@ impl ModrinthClient {
         offset: u32,
         index: &str,
     ) -> Result<SearchResponse> {
+        let _permit = self
+            .sem
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!("信号量已关闭: {e}"))?;
         let mut params: Vec<(&str, String)> = vec![
             ("query", query.to_string()),
             ("limit", limit.to_string()),
@@ -128,6 +143,11 @@ impl ModrinthClient {
     }
 
     pub async fn project(&self, slug: &str) -> Result<Project> {
+        let _permit = self
+            .sem
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!("信号量已关闭: {e}"))?;
         self.http
             .get(format!("{API_BASE}/project/{slug}"))
             .send()
@@ -145,6 +165,11 @@ impl ModrinthClient {
         game_version: &str,
         loader: &str,
     ) -> Result<Vec<ModVersion>> {
+        let _permit = self
+            .sem
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!("信号量已关闭: {e}"))?;
         Ok(self
             .http
             .get(format!("{API_BASE}/project/{slug}/version"))
