@@ -137,7 +137,8 @@ DOM.messages.addEventListener("click", async (e) => {
   setTimeout(() => (btn.textContent = "复制"), 1500);
 });
 
-// 流式期间按帧合并重渲染 (每个 delta 都全量 parse 会浪费), 最终 reply 事件仍即时渲染
+// 流式期间按帧合并重渲染 (每个 delta 都全量 parse 会浪费), 最终 reply 事件仍即时渲染。
+// scrollBottom 也并入本帧, 避免每个 delta 各触发一次 scrollTop 赋值导致高频重绘。
 let mdPaintQueued = false;
 function queueMdRender(pending) {
   if (mdPaintQueued || !pending.replyEl) return;
@@ -497,13 +498,18 @@ async function send() {
       while ((idx = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 1);
-        if (line) handleEvent(JSON.parse(line), pending, progress, thinking);
+        if (!line) continue;
+        // NDJSON 流中畸形行 (网络中断半行/代理截断) 跳过, 不中断整轮流式
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        handleEvent(ev, pending, progress, thinking);
       }
     }
   } catch (e) {
     if (e.name === "AbortError") return; // 主动切换会话丢弃旧轮输出, 不算错误
     hideThinking(thinking);
     addMsg("error", "连接失败: " + escapeHtml(e.message || e));
+    markOffline(); // 发送失败即时标记离线, 不等 30s 轮询
   } finally {
     chatController = null;
     hideThinking(thinking);
@@ -552,7 +558,8 @@ function handleEvent(ev, pending, progress, thinking) {
       break;
     }
     case "reply_delta": {
-      // 流式打字机: 增量累积, 按帧重渲染 markdown (粗体/列表/表格流式期间即生效)
+      // 流式打字机: 增量累积, 按帧重渲染 markdown (粗体/列表/表格流式期间即生效)。
+      // scrollBottom 由 queueMdRender 的 rAF 回调统一做, 不在此重复触发。
       hideThinking(thinking);
       clearProgress(progress);
       if (!pending.replyEl) {
@@ -561,7 +568,6 @@ function handleEvent(ev, pending, progress, thinking) {
       }
       pending.replyText += ev.text;
       queueMdRender(pending);
-      scrollBottom();
       break;
     }
     case "reply":
@@ -748,6 +754,18 @@ async function checkHealth() {
   }
 }
 
+// 定时健康检查: 服务器重启/断网后顶栏即时反映, 不等用户发消息才发现失败
+function startHealthPolling() {
+  checkHealth();
+  setInterval(checkHealth, 30000);
+}
+
+// 标记离线 (send 失败时调用, 不等下次轮询)
+function markOffline() {
+  DOM["status-dot"].className = "dot bad";
+  DOM["status-text"].textContent = "离线";
+}
+
 /* ---------- 预设选项栏 (版本/加载器/找包数量) ---------- */
 // Persistent controls are kept in one state object.
 
@@ -868,7 +886,7 @@ document.addEventListener("keydown", (e) => {
 applyTheme(localStorage.getItem("rustagent-theme") || "dark");
 loadPreset();
 showWelcome();
-checkHealth();
+startHealthPolling();
 refreshSidebar();
 loadTools();
 loadRecommend();

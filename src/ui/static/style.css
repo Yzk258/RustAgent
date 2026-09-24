@@ -64,6 +64,12 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+/* 交互元素过渡: 原 * { transition } 全局通配符对每个元素都加过渡, 流式渲染/
+   主题切换时全页面重绘卡顿。改为只给真正需要视觉反馈的元素加过渡。 */
+button, input, select, textarea, .card, .chip, .seg-btn, .modal-panel,
+.tool-line, .tag-chip, .dot, .icon-btn {
   transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease,
     box-shadow 180ms ease;
 }
