@@ -5,7 +5,7 @@
 一款用 Rust 编写的 **Minecraft 模组管理 Agent**：你用自然语言描述想要什么（版本、加载器、玩法偏好），它替你去 Modrinth 搜索、筛选、组包，最后生成一个可以直接拖进启动器（如 PCL2）安装的 `.mrpack` 整合包文件。
 
 <div align="center">
-  <img src="rustagent.png" width="800">
+  <img src="modsmith.png" width="800">
 </div>
 
 <div align="center">
