@@ -124,6 +124,8 @@ cargo run -- desktop
    - 打开 `userdata\downloads\` 目录，把 `.mrpack` 拖进 PCL2 等启动器即可游玩；
    - 所有数据都在 `userdata\` 文件夹里，整个删掉即可完全重置。
 
+> 快捷方式里的 `ui` 换成 `desktop`，双击就直接开原生桌面窗口（不开浏览器、不用命令行）。注意双击启动时 Windows 会顺带分配一个控制台窗口（exe 是控制台程序），从终端 `cargo run -- desktop` 启动则没有这个窗口 —— 想去掉它需要单独做无控制台入口，暂未实现。
+
 ## 交互命令
 
 | 命令       | 作用                                                                                                                              |

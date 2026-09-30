@@ -1429,4 +1429,63 @@ mod tests {
         assert!(!output.shapes.is_empty(), "这一帧什么都没画出来");
         assert!(matches!(c.messages.last(), Some(Msg::Notice(_))));
     }
+
+    /// 完整一帧: 顶栏 + 侧栏四卡 + 输入/预设栏 + 对话区 + 设置弹窗全走一遍。
+    /// 这些 `ui_*` 方法只吃 `egui::Context` (不碰 `eframe::Frame`), 所以能在测试里整帧驱动 ——
+    /// 面板顺序、输入框宽度计算、设置表格布局出问题都会在这里炸, 而不是等用户开窗口才发现。
+    #[test]
+    fn full_window_frame_renders_with_and_without_settings_modal() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel();
+        let (_ev_tx, ev_rx) = mpsc::channel();
+        let llm = LlmConfig {
+            base_url: "https://example.invalid/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "test-model".to_string(),
+            context_length: 32768,
+            price_input_per_m: 0.0,
+            price_output_per_m: 0.0,
+            token_budget: 0,
+            max_tool_iterations: 16,
+            thinking: None,
+        };
+        let temp = std::env::temp_dir();
+        let mut app = DesktopApp::new(
+            cmd_tx,
+            ev_rx,
+            Arc::new(AtomicBool::new(false)),
+            temp.join("rustagent-desktop-test-downloads").display().to_string(),
+            temp.join(format!("rustagent-desktop-{}.db", std::process::id())).display().to_string(),
+            // 测试里不点"保存", 所以这个路径不会被写
+            temp.join("rustagent-desktop-test-config.toml").display().to_string(),
+            llm.model.clone(),
+            SettingsForm::from(&llm, false),
+            llm,
+        );
+        // 攒出一轮完整对话, 让对话区有气泡/工具行/mod 卡片可画
+        app.chat.apply(AgentEvent::ToolCall { name: "search_mods".into(), args: "{}".into() });
+        app.chat.apply(AgentEvent::Progress { text: "收集 sodium (2/8)".into(), current: Some(2), total: Some(8) });
+        app.chat.apply(AgentEvent::ToolResult { name: "search_mods".into(), ok: true, result: Some(hit_json()) });
+        app.chat.apply(AgentEvent::Reply { text: "找到 1 个候选。".into() });
+
+        let ctx = egui::Context::default();
+        install_skin(&ctx);
+        for settings_open in [false, true] {
+            app.settings_open = settings_open;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1180.0, 800.0))),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                app.ui_topbar(ctx);
+                app.ui_sidebar(ctx);
+                app.ui_input(ctx);
+                app.ui_chat(ctx);
+                app.ui_settings(ctx);
+            });
+            assert!(!out.shapes.is_empty(), "settings_open={settings_open} 这一帧没画东西");
+        }
+        // 下载目录不存在时侧栏只是空列表, 不能因此报错
+        assert!(app.packs.is_empty());
+        assert!(app.tools.iter().any(|(name, _)| name == "search_mods"));
+    }
 }
