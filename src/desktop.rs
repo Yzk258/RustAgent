@@ -1712,6 +1712,9 @@ mod tests {
         assert!(font.is_some(), "Windows 上应当能找到系统里的中文字体");
 
         let mut c = Chat::welcome();
+        // 从"用户发消息"开始, 让这一帧也走到轮次竖线 (draw_turn) 那条分支
+        c.begin_turn();
+        c.messages.push(Msg::User("帮我找 1.21.1 fabric 的优化整合包".into()));
         c.apply(AgentEvent::ToolCall { name: "search_mods".into(), args: "{}".into() });
         c.apply(AgentEvent::Progress { text: "收集 sodium (2/8)".into(), current: Some(2), total: Some(8) });
         c.apply(AgentEvent::ToolResult {
