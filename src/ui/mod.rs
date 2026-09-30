@@ -42,7 +42,8 @@ const APP_JS: &str = include_str!("static/app.js");
 const MARKED_JS: &str = include_str!("static/marked.min.js");
 
 /// 启动 Web UI 服务器 (cargo run -- ui)。config_path 用于设置窗口把改动写回配置文件。
-pub async fn serve(cfg: Config, config_path: &str) -> Result<()> {
+/// auto_open=false 时跳过"自动打开浏览器"(cargo run -- ui --no-browser)。
+pub async fn serve(cfg: Config, config_path: &str, auto_open: bool) -> Result<()> {
     let interrupt = Arc::new(AtomicBool::new(false));
     let port = cfg.ui.port;
     let agent = Arc::new(tokio::sync::Mutex::new(
@@ -73,12 +74,32 @@ pub async fn serve(cfg: Config, config_path: &str) -> Result<()> {
     let addr = format!("127.0.0.1:{port}");
     let url = format!("http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    // 服务器一定先起来再谈"怎么打开界面": 地址单独占一行, 方便双击选中复制
     println!("RustAgent Web UI 已启动: {url}");
+    // 两种模式都把地址放进剪贴板: 自动打开失败时这是最省事的手动路径
+    if copy_to_clipboard(&url) {
+        println!("(地址已复制到剪贴板)");
+    }
+    if auto_open {
+        // 先复制地址, 再交给系统默认浏览器。两者都是尽力而为 ——
+        // 进程被降权(低 IL)或浏览器已以管理员身份运行时, 系统按 UIPI 拒绝跨完整性级别的
+        // 单例转发, 表现是浏览器自己弹"未响应/现有实例正在以提升的权限运行";
+        // 那次失败发生在浏览器进程内部, 我们拿不到错误码, 所以只能把地址给到用户手动粘贴。
+        open_browser(&url);
+        println!("已尝试自动打开浏览器; 界面没弹出时多在浏览器地址栏粘贴上面的地址即可");
+    } else {
+        println!("(--no-browser: 请在浏览器地址栏粘贴上面的地址)");
+    }
     println!("按 Ctrl+C 停止服务器");
-    open_browser(&url);
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// 是否自动打开浏览器: 只有显式传 `--no-browser` 才关掉 (`cargo run -- ui --no-browser`)。
+/// 单独抽出来是为了能测: 被沙箱降权的环境里自动打开必然失败, 这个开关是唯一的出路。
+pub fn auto_open_enabled(extra_args: &[String]) -> bool {
+    !extra_args.iter().any(|a| a == "--no-browser")
 }
 
 /// 路由注册中心。新增页面或接口时在这里追加一条路由即可。
@@ -159,7 +180,8 @@ async fn js_response(body: &'static str) -> Response {
         .into_response()
 }
 
-/// 尝试用系统默认浏览器打开页面, 失败静默忽略 (用户可手动输入地址)
+/// 尝试用系统默认浏览器打开页面。注意这是"尽力而为": `cmd /C start` 自身总会成功返回,
+/// 真正的失败 (跨完整性级别的单例转发被 UIPI 拒绝) 发生在浏览器进程内部并弹窗, 这里看不到。
 fn open_browser(url: &str) {
     #[cfg(windows)]
     let _ = std::process::Command::new("cmd")
@@ -167,4 +189,47 @@ fn open_browser(url: &str) {
         .spawn();
     #[cfg(not(windows))]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+/// 把地址写进剪贴板 (尽力而为, 失败返回 false)。走系统自带的 clip.exe, 不引入新依赖;
+/// 设置剪贴板不同于给窗口发消息, 不受 UIPI 跨完整性级别限制, 所以在低 IL 下通常仍然可用
+/// (实测: 低 IL 沙箱内 `cmd /C 'echo <url>| clip'` 可写入)。
+fn copy_to_clipboard(text: &str) -> bool {
+    #[cfg(windows)]
+    {
+        // 不让特殊字符进 shell: 这里的 URL 是本地回环地址, 命中即放弃复制 (少一次便利而已)
+        if text.chars().any(|c| "|&<>^\"%\r\n".contains(c)) {
+            return false;
+        }
+        return std::process::Command::new("cmd")
+            .args(["/C", &format!("echo {text}| clip")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = text;
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_open_enabled;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 被降权的环境里自动打开必然失败, 所以 `--no-browser` 必须真的能关掉它
+    #[test]
+    fn no_browser_flag_disables_auto_open() {
+        assert!(auto_open_enabled(&args(&[])));
+        assert!(auto_open_enabled(&args(&["--verbose"])));
+        assert!(!auto_open_enabled(&args(&["--no-browser"])));
+        assert!(!auto_open_enabled(&args(&["something", "--no-browser"])));
+    }
 }

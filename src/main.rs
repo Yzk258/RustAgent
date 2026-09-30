@@ -23,7 +23,8 @@ async fn main() -> Result<()> {
         return selftest::run(&cfg).await;
     }
     if args.len() > 1 && args[1] == "ui" {
-        return ui::serve(cfg, "config.toml").await;
+        // --no-browser: 跳过自动打开浏览器 (进程被降权 / 浏览器已提权时系统会拒绝跨 IL 转发)
+        return ui::serve(cfg, "config.toml", ui::auto_open_enabled(&args[2..])).await;
     }
     if args.len() > 1 && args[1] == "desktop" {
         return desktop::run(cfg);

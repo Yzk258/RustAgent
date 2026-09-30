@@ -91,6 +91,19 @@ cargo run -- ui
 
 启动后浏览器自动打开本地 Web 界面（默认 http://127.0.0.1:1780，端口在 `config.toml` 的 `[ui]` 段配置）。界面功能详见下方 [Web 界面](#web-界面) 章节。
 
+**界面没自动弹出来？** 启动时那行 `RustAgent Web UI 已启动: http://127.0.0.1:1780` 说明服务器已经好了，把地址粘到浏览器地址栏即可（程序会顺带把地址放进剪贴板）。自动打开失败几乎只有两种原因，都跟 RustAgent 无关，而是 Windows 的完整性级别（IL）规则：
+
+- 本进程被沙箱/宿主降权到低 IL（`whoami /groups | findstr /i mandatory` 显示 `Low`）；
+- 浏览器已经在以管理员身份（高 IL）运行。
+
+此时系统按 UIPI 拒绝把 URL 从低 IL 转交给已运行的高 IL 浏览器实例，浏览器会自己弹一个"未响应 / 现有实例正在以提升的权限运行"的窗口 —— 那次失败发生在浏览器进程内部，RustAgent 收不到错误码，所以只能提示。同一条规则也会让"打开目录"失效（转交给资源管理器单例）。
+
+不想看到那个弹窗就用：
+
+```bash
+cargo run -- ui --no-browser          # 服务器照常起, 跳过自动打开浏览器 (地址仍会复制到剪贴板)
+```
+
 **方式三：桌面原生界面（不想开浏览器，也不想留一个控制台窗口）**
 
 ```bash
@@ -143,6 +156,7 @@ cargo run -- desktop
 ```bash
 cargo run -- selftest                 # 不耗 LLM token 的自检: 测试 Modrinth 搜索、四种加载器版本获取与组包、校验 .mrpack 格式
 cargo run -- ui                       # 启动 Web 界面 (默认 http://127.0.0.1:1780, 自动打开浏览器)
+cargo run -- ui --no-browser          # 同上, 但不尝试自动打开浏览器 (被降权/浏览器已提权时用这个)
 cargo run -- desktop                  # 启动原生桌面界面 (egui, 不启 HTTP 服务、不开浏览器)
 cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # 向已生成的整合包补入指定 mod
 ```
