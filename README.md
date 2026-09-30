@@ -104,7 +104,20 @@ cargo run -- ui
 cargo run -- ui --no-browser          # 服务器照常起, 只不尝试打开浏览器 (地址仍会复制到剪贴板)
 ```
 
-> **为什么会被降权？** 子进程继承父进程的完整性级别。从资源管理器双击、或从开始菜单的 Windows Terminal / PowerShell 启动是 **Medium**（正常）；从被沙箱化的宿主（如某些 Electron 应用内置终端、沙箱工具）里启动会变成 **Low**，此时系统级集成（打开浏览器/资源管理器）会受上面这条限制。想让自动打开生效，就用 Medium 环境启动。
+> **为什么会被降权？怎么修？** 有两个独立原因，中任一条都是 Low：
+>
+> 1. **启动它的父进程是 Low**（子进程的令牌派生自父进程，只会同级或更低）。从资源管理器双击、开始菜单的 Windows Terminal / PowerShell 启动都是 **Medium**；从被沙箱化的宿主（部分 Electron 应用内置终端、沙箱工具）里启动会是 **Low**。
+> 2. **工作区目录被标成了 Low 且带 `(OI)(CI)` 继承** —— 于是 `cargo` 在 `target\` 里产出的 `rustagent.exe` **自身也是 Low 标签**，而从带 Low 标签的 exe 启动出来的进程就是 Low，**哪怕启动者是 Medium**。这一条跟"谁启动"无关，最容易被误判成"终端的问题"（本项目实际踩到的就是这条）。
+>
+> 自查（三选一）：启动时程序自己会打印 `(本进程完整性级别 Low: …)`；`icacls "D:\code\myagent\RustAgent" | findstr /i mandatory` 看目录标签；`whoami /groups | findstr /i mandatory` 看当前终端标签。
+>
+> 命中第 2 条时，把工作区整棵树恢复成 Medium 标签（`/T` 覆盖已有文件，`(OI)(CI)` 管住以后新建的）：
+>
+> ```powershell
+> icacls "D:\code\myagent\RustAgent" /setintegritylevel "(OI)(CI)M" /T /C
+> ```
+>
+> ⚠️ 该命令会顺带带上 **`NW`（no-write-up）策略**：改完之后**低 IL 的写入者会被拒绝**（实测：低 IL 的 pwsh 往工作区写文件报"访问被拒绝"，Medium 的进程照常）。所以改完必须保证 RustAgent 自己跑在 Medium，否则它会以"数据库/下载目录都写不进去"的形式报错。若确实需要"低 IL 也能写"，得去掉 `NW` 策略（`icacls` 做不到，需要用 SDDL 直接写 SACL）。宿主若每次会话又把工作区降回 Low，重跑上面这条命令即可。
 
 **方式三：桌面原生界面（不想开浏览器，也不想留一个控制台窗口）**
 
@@ -185,21 +198,21 @@ cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # �
 
 `cargo run -- desktop` 打开原生窗口（egui/eframe 渲染）。它不是 Web 版的另一套实现，而是**同一套界面格式换一个渲染层**：数据来源、事件流、配置与会话存档都与 Web 版共用，区别只是把 `AgentEvent` 直接画进窗口、不经过 HTTP。
 
-| Web 版 (`src/ui/static/*`)                | 桌面版 (`src/desktop.rs`)               | 说明                                                                                     |
-| ----------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `#topbar` 品牌 / 模型 / 状态 / ⚙           | `ui_topbar()`                           | 版本号、当前模型、绿(就绪)/黄(处理中)状态点                                              |
-| 侧栏 `.card`：会话 / 统计 / 整合包 / 工具 | `ui_sidebar()` + `card()`               | 数据同源：`api::packs` ↔ `scan_packs()`、`/api/profile` ↔ `load_taste()`、`/api/tools` ↔ `ToolRegistry::defs()` |
-| `.msg-row` 头像 + 气泡                    | `bubble()`                              | 用户靠右（强调色底）、助手靠左（气泡色底）、提示为灰色小卡                                |
-| `.turn-group` / `.turn-body` 轮次竖线     | `draw_turn()`                           | 一轮的全部内容用左侧竖线连成一段；无归属的提示（欢迎语/打断提示）不进竖线                 |
-| `⚙ 调用工具 x …` → `⚙ x 完成/失败`       | `Msg::Tool` + `draw_msg()`              | 黄 → 绿/红；结果里带 mod 列表时补一句"· 找到 N 个候选"                                    |
-| `⏳ ▰▰▱▱ 3/8 …`                          | `Msg::Progress` + `progress_prefix()`   | 同一次工具调用内原地刷新，工具结果一到就撤行                                              |
-| `collectMods()` / `renderTurnMods()`      | `Chat::collect_mods()` / `render_turn_mods()` | **轮内只攒不铺，收尾只铺一屏**；入选优先级（进包 > 回复点名 > 全部候选）、slug 词边界匹配、同轮只铺一次，都与 Web 版一致 |
-| 📦 mod 卡片（图标/标题链接/描述/下载量/分类） | `Msg::Cards` + `mod_card()`             | 组标题来自 `final_mods()`（`已加入整合包的 mod · N` / `本轮推荐的 mod · N` / `本轮候选 mod · N`）；`extract_mods()` 与前端 `extractMods` 同约定：**只认带 slug+title 的列表**（search_mods / recommend），`build_modpack` 结果只用来确定"哪些进包了" |
-| `modIndex`（跨轮 slug → 元数据）          | `Chat::mod_index` + `merge_mod()`       | 组包结果只有 slug，靠会话索引补回标题/下载量；逐字段合并（后一次缺的字段不冲掉已有的）     |
-| `#presetbar` 版本 / 加载器 / 数量          | `ui_input()` 上半                      | 复用同一个 `pipeline::preset_prefix()` 生成 `[界面预设: …]` 前缀                          |
-| 输入栏 + ⏸ 打断                           | `ui_input()` 下半                      | Enter 发送、Shift+Enter 换行，处理中变成"打断"                                           |
-| 设置弹窗 ⚙                                | `ui_settings()`                         | 字段一致；保存走 `config::save_llm()` 写回 `config.toml` 并热更新 agent（不重启）。**API Key 是密码框、默认留空、只显示 `***末4位`**：留空 = 保持不变，明文永不进界面（与 Web 版 `type=password` + `/api/settings` 脱敏同一套约定） |
-| `handleEvent()` 事件分发                  | `Chat::apply()`                         | 顺序规则对齐：工具调用后另起气泡、进度行用完即撤、`reply` 完整文本覆盖流式累积            |
+| Web 版 (`src/ui/static/*`)                  | 桌面版 (`src/desktop.rs`)                       | 说明                                                                                                                                                                                                                                                                       |
+| --------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `#topbar` 品牌 / 模型 / 状态 / ⚙           | `ui_topbar()`                                   | 版本号、当前模型、绿(就绪)/黄(处理中)状态点                                                                                                                                                                                                                                |
+| 侧栏`.card`：会话 / 统计 / 整合包 / 工具    | `ui_sidebar()` + `card()`                     | 数据同源：`api::packs` ↔ `scan_packs()`、`/api/profile` ↔ `load_taste()`、`/api/tools` ↔ `ToolRegistry::defs()`                                                                                                                                             |
+| `.msg-row` 头像 + 气泡                      | `bubble()`                                      | 用户靠右（强调色底）、助手靠左（气泡色底）、提示为灰色小卡                                                                                                                                                                                                                 |
+| `.turn-group` / `.turn-body` 轮次竖线     | `draw_turn()`                                   | 一轮的全部内容用左侧竖线连成一段；无归属的提示（欢迎语/打断提示）不进竖线                                                                                                                                                                                                  |
+| `⚙ 调用工具 x …` → `⚙ x 完成/失败`    | `Msg::Tool` + `draw_msg()`                    | 黄 → 绿/红；结果里带 mod 列表时补一句"· 找到 N 个候选"                                                                                                                                                                                                                   |
+| `⏳ ▰▰▱▱ 3/8 …`                        | `Msg::Progress` + `progress_prefix()`         | 同一次工具调用内原地刷新，工具结果一到就撤行                                                                                                                                                                                                                               |
+| `collectMods()` / `renderTurnMods()`      | `Chat::collect_mods()` / `render_turn_mods()` | **轮内只攒不铺，收尾只铺一屏**；入选优先级（进包 > 回复点名 > 全部候选）、slug 词边界匹配、同轮只铺一次，都与 Web 版一致                                                                                                                                             |
+| 📦 mod 卡片（图标/标题链接/描述/下载量/分类） | `Msg::Cards` + `mod_card()`                   | 组标题来自`final_mods()`（`已加入整合包的 mod · N` / `本轮推荐的 mod · N` / `本轮候选 mod · N`）；`extract_mods()` 与前端 `extractMods` 同约定：**只认带 slug+title 的列表**（search_mods / recommend），`build_modpack` 结果只用来确定"哪些进包了" |
+| `modIndex`（跨轮 slug → 元数据）           | `Chat::mod_index` + `merge_mod()`             | 组包结果只有 slug，靠会话索引补回标题/下载量；逐字段合并（后一次缺的字段不冲掉已有的）                                                                                                                                                                                     |
+| `#presetbar` 版本 / 加载器 / 数量           | `ui_input()` 上半                               | 复用同一个`pipeline::preset_prefix()` 生成 `[界面预设: …]` 前缀                                                                                                                                                                                                       |
+| 输入栏 + ⏸ 打断                              | `ui_input()` 下半                               | Enter 发送、Shift+Enter 换行，处理中变成"打断"                                                                                                                                                                                                                             |
+| 设置弹窗 ⚙                                   | `ui_settings()`                                 | 字段一致；保存走`config::save_llm()` 写回 `config.toml` 并热更新 agent（不重启）。**API Key 是密码框、默认留空、只显示 `***末4位`**：留空 = 保持不变，明文永不进界面（与 Web 版 `type=password` + `/api/settings` 脱敏同一套约定）                         |
+| `handleEvent()` 事件分发                    | `Chat::apply()`                                 | 顺序规则对齐：工具调用后另起气泡、进度行用完即撤、`reply` 完整文本覆盖流式累积                                                                                                                                                                                           |
 
 有意保留的差异（避免重复造轮子）：
 
