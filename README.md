@@ -174,9 +174,12 @@ cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # �
 | `#topbar` 品牌 / 模型 / 状态 / ⚙           | `ui_topbar()`                           | 版本号、当前模型、绿(就绪)/黄(处理中)状态点                                              |
 | 侧栏 `.card`：会话 / 统计 / 整合包 / 工具 | `ui_sidebar()` + `card()`               | 数据同源：`api::packs` ↔ `scan_packs()`、`/api/profile` ↔ `load_taste()`、`/api/tools` ↔ `ToolRegistry::defs()` |
 | `.msg-row` 头像 + 气泡                    | `bubble()`                              | 用户靠右（强调色底）、助手靠左（气泡色底）、提示为灰色小卡                                |
-| `⚙ 调用工具 x …` → `⚙ x 完成/失败`       | `Msg::Tool` + `draw_messages()`         | 黄 → 绿/红，同一工具行原地更新                                                           |
+| `.turn-group` / `.turn-body` 轮次竖线     | `draw_turn()`                           | 一轮的全部内容用左侧竖线连成一段；无归属的提示（欢迎语/打断提示）不进竖线                 |
+| `⚙ 调用工具 x …` → `⚙ x 完成/失败`       | `Msg::Tool` + `draw_msg()`              | 黄 → 绿/红；结果里带 mod 列表时补一句"· 找到 N 个候选"                                    |
 | `⏳ ▰▰▱▱ 3/8 …`                          | `Msg::Progress` + `progress_prefix()`   | 同一次工具调用内原地刷新，工具结果一到就撤行                                              |
-| 📦 mod 卡片（图标/标题链接/描述/下载量/分类） | `Msg::Cards` + `mod_card()`             | `extract_mods()` 的 JSON 约定与前端 `extractMods` 相同（search_mods 与 build_modpack 两种形状都吃） |
+| `collectMods()` / `renderTurnMods()`      | `Chat::collect_mods()` / `render_turn_mods()` | **轮内只攒不铺，收尾只铺一屏**；入选优先级（进包 > 回复点名 > 全部候选）、slug 词边界匹配、同轮只铺一次，都与 Web 版一致 |
+| 📦 mod 卡片（图标/标题链接/描述/下载量/分类） | `Msg::Cards` + `mod_card()`             | 组标题来自 `final_mods()`（`已加入整合包的 mod · N` / `本轮推荐的 mod · N` / `本轮候选 mod · N`）；`extract_mods()` 与前端 `extractMods` 同约定：**只认带 slug+title 的列表**（search_mods / recommend），`build_modpack` 结果只用来确定"哪些进包了" |
+| `modIndex`（跨轮 slug → 元数据）          | `Chat::mod_index` + `merge_mod()`       | 组包结果只有 slug，靠会话索引补回标题/下载量；逐字段合并（后一次缺的字段不冲掉已有的）     |
 | `#presetbar` 版本 / 加载器 / 数量          | `ui_input()` 上半                      | 复用同一个 `pipeline::preset_prefix()` 生成 `[界面预设: …]` 前缀                          |
 | 输入栏 + ⏸ 打断                           | `ui_input()` 下半                      | Enter 发送、Shift+Enter 换行，处理中变成"打断"                                           |
 | 设置弹窗 ⚙                                | `ui_settings()`                         | 字段一致；保存走 `config::save_llm()` 写回 `config.toml` 并热更新 agent（不重启）          |
@@ -187,12 +190,13 @@ cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # �
 - **Markdown**：助手回复按纯文本渲染（Web 版走 marked.js），代码块/列表原样显示，不做富文本排版；
 - **图片**：mod 图标位是 📦 占位块，截图只显示张数，点标题跳 Modrinth 官网看（不引入联网图片解码依赖）；
 - **"试试这个"推荐卡、会话记录导入列表、白天/黑夜主题切换**：目前只在 Web 版提供；
-- **中文字体**：启动时从系统字体（微软雅黑 / 黑体 / 等线 / 宋体）自动挑一个装进 egui；`C:\Windows\Fonts` 里一个都读不到时中文会显示成方框，但不影响运行。
+- **中文字体**：启动时从系统字体（微软雅黑 / 黑体 / 等线 / 宋体）自动挑一个装进 egui；`C:\Windows\Fonts` 里一个都读不到时中文会显示成方框，但不影响运行；
+- **轮次竖线**：Web 版是渐变竖线，桌面版是同色系实色（egui 的矩形填充不做渐变）。
 
 `Chat::apply()` 是上述顺序规则的唯一出处 —— 改动它请同步改 `src/ui/static/app.js` 的 `handleEvent()`。它和无窗口渲染都有测试兜底：
 
 ```bash
-cargo test --lib desktop::    # 消息组装规则 + 下载量/进度条格式 + 无窗口排版一帧(含 mod 卡片网格)
+cargo test --lib desktop::    # 消息组装/卡片延后/跨轮索引/词边界 + 下载量与进度条格式 + 无窗口整帧排版
 ```
 
 ## 生成物说明

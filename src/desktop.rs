@@ -34,6 +34,7 @@ mod skin {
     pub const GREEN: Color32 = Color32::from_rgb(52, 211, 153); // --green
     pub const RED: Color32 = Color32::from_rgb(248, 113, 113); // --red
     pub const YELLOW: Color32 = Color32::from_rgb(251, 191, 36); // --yellow
+    pub const RAIL: Color32 = Color32::from_rgb(46, 56, 82); // 轮次竖线 (Web 版是渐变, 这里用同色系实色)
 }
 
 /// 中文字体: egui 自带字体不含 CJK, 不装就全是"豆腐块"方框。
@@ -109,7 +110,7 @@ enum ToolState {
 }
 
 /// mod 卡片 (来自 search_mods / build_modpack 的工具返回数据, 见 app.js 的 extractMods)
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ModCard {
     title: String,
     slug: String,
@@ -126,12 +127,12 @@ enum Msg {
     User(String),
     /// 助手回复 (气泡靠左, 头像"⛏"; ReplyDelta 流式追加)
     Assistant(String),
-    /// `⚙ 调用工具 x …` → 完成/失败
-    Tool { name: String, state: ToolState },
+    /// `⚙ 调用工具 x …` → 完成/失败 (found > 0 时补一句"找到 N 个候选")
+    Tool { name: String, state: ToolState, found: usize },
     /// `⏳ ▰▰▱▱ 3/8 正在…`: 同一工具调用内原地更新
     Progress { text: String, current: Option<u64>, total: Option<u64> },
-    /// mod 卡片网格
-    Cards(Vec<ModCard>),
+    /// mod 卡片网格: 本轮收尾才铺一次, caption 为组标题 (如 "已加入整合包的 mod · 12")
+    Cards { caption: String, cards: Vec<ModCard> },
     /// 系统提示 (出错/打断/欢迎)
     Notice(String),
 }
@@ -151,6 +152,14 @@ struct Chat {
     busy: bool,
     /// 本轮已收 LlmUsage 增量 (快照到达后清零), 让统计卡片在本轮内也能动
     token_delta: u64,
+    /// 本轮攒下的 mod (轮内只攒不渲染): 收尾时统一铺一屏 (同 app.js 的 turn.mods)
+    turn_mods: Vec<ModCard>,
+    /// 会话级 slug → 元数据: 组包结果只有 slug, 靠它补回标题/图标 (同 app.js 的 modIndex)
+    mod_index: Vec<ModCard>,
+    /// 本轮真正进包的 slug (来自 build_modpack 成功结果)
+    built: Vec<String>,
+    /// 本轮卡片是否已铺: 保证同一轮只出现一屏 mod 列表
+    rendered: bool,
     /// 本轮已结束: 侧栏需要重扫 (整合包列表/口味库)
     dirty: bool,
 }
@@ -174,6 +183,87 @@ impl Chat {
         self.cur_reply = None;
         self.cur_progress = None;
         self.thinking_tail.clear();
+        self.reset_turn();
+        self.mod_index.clear(); // 清空对话 = 不再需要跨轮补标题, 也避免串旧元数据
+    }
+
+    /// 新一轮开始 (用户发消息时调用): 清掉上一轮的 mod 汇总, 但保留会话级索引
+    fn begin_turn(&mut self) {
+        self.reset_turn();
+        self.cur_reply = None;
+        self.drop_progress();
+        self.busy = true;
+    }
+
+    fn reset_turn(&mut self) {
+        self.turn_mods.clear();
+        self.built.clear();
+        self.rendered = false;
+    }
+
+    /// 把一次工具结果里的 mod 收进本轮 + 会话索引, 返回本次结果里的个数 (0 = 无列表)。
+    /// 轮内只攒不渲染 —— 一轮里 agent 常搜好几次 (换词/回退重试), 每次都铺卡片会把
+    /// 真正要看的"最后那几个"淹没 (与 app.js 的 collectMods 同一套逻辑)。
+    fn collect_mods(&mut self, result: Option<&serde_json::Value>) -> usize {
+        let mods = extract_mods(result);
+        for m in &mods {
+            if m.slug.is_empty() {
+                continue;
+            }
+            merge_mod(&mut self.mod_index, m);
+            merge_mod(&mut self.turn_mods, m);
+        }
+        mods.len()
+    }
+
+    /// 本轮该铺哪几个 mod (优先级与 app.js 的 finalMods 一致):
+    /// 1. 本轮组过包 → 真正进包的那几个 (用户已确认; 组包结果只有 slug, 靠索引补标题,
+    ///    索引里没有的 = 自动补全的前置依赖, 不铺卡片)
+    /// 2. 否则 → 最终回复正文点到名的那些
+    /// 3. 都没有 → 兜底铺本轮全部候选
+    fn final_mods(&self, reply_text: &str) -> Option<(String, Vec<ModCard>)> {
+        if !self.built.is_empty() {
+            let known: Vec<ModCard> = self
+                .built
+                .iter()
+                .filter_map(|s| self.mod_index.iter().find(|m| &m.slug == s).cloned())
+                .collect();
+            if !known.is_empty() {
+                return Some((format!("已加入整合包的 mod · {}", known.len()), known));
+            }
+            let fallback: Vec<ModCard> = self
+                .built
+                .iter()
+                .map(|slug| ModCard { title: slug.clone(), slug: slug.clone(), ..Default::default() })
+                .collect();
+            return Some((format!("已加入整合包的 mod · {}", fallback.len()), fallback));
+        }
+        if self.turn_mods.is_empty() {
+            return None;
+        }
+        if !reply_text.is_empty() {
+            let named: Vec<ModCard> = self
+                .turn_mods
+                .iter()
+                .filter(|m| mentions_slug(reply_text, &m.slug))
+                .cloned()
+                .collect();
+            if !named.is_empty() {
+                return Some((format!("本轮推荐的 mod · {}", named.len()), named));
+            }
+        }
+        Some((format!("本轮候选 mod · {}", self.turn_mods.len()), self.turn_mods.clone()))
+    }
+
+    /// 本轮收尾: 卡片只在最终回复之后统一铺一次 (同一轮只出现一屏 mod 列表)
+    fn render_turn_mods(&mut self, reply_text: &str) {
+        if self.rendered {
+            return;
+        }
+        if let Some((caption, cards)) = self.final_mods(reply_text) {
+            self.rendered = true;
+            self.messages.push(Msg::Cards { caption, cards });
+        }
     }
 
     fn take_dirty(&mut self) -> bool {
@@ -208,22 +298,29 @@ impl Chat {
                 // 工具调用后的新文本要另起气泡, 否则回复会续写到工具行上面去
                 self.cur_reply = None;
                 self.busy = true;
-                self.messages.push(Msg::Tool { name, state: ToolState::Pending });
+                self.messages.push(Msg::Tool { name, state: ToolState::Pending, found: 0 });
             }
             AgentEvent::ToolResult { name, ok, result } => {
+                // mod 列表先攒着不渲染, 工具行上给"找到几个"的即时反馈, 不丢"每步都有回音"
+                let found = self.collect_mods(result.as_ref());
                 for m in self.messages.iter_mut().rev() {
-                    if let Msg::Tool { name: n, state } = m {
+                    if let Msg::Tool { name: n, state, found: f } = m {
                         if *n == name && *state == ToolState::Pending {
                             *state = if ok { ToolState::Ok } else { ToolState::Fail };
+                            *f = if ok { found } else { 0 };
                             break;
                         }
                     }
                 }
                 self.drop_progress();
-                // 工具返回数据含 mod 列表时插入结构化卡片 (与 Web 版 renderModCards 同位置)
-                let cards = extract_mods(result.as_ref());
-                if !cards.is_empty() {
-                    self.messages.push(Msg::Cards(cards));
+                // 本轮组过包: 记下真正进包的 slug, 收尾时只铺这几个 (用户已确认的那批)
+                if name == "build_modpack" && ok {
+                    if let Some(mods) = result.as_ref().and_then(|r| r.get("mods")).and_then(|m| m.as_array()) {
+                        self.built = mods
+                            .iter()
+                            .filter_map(|m| m.get("slug").and_then(|v| v.as_str()).map(str::to_string))
+                            .collect();
+                    }
                 }
             }
             AgentEvent::Progress { text, current, total } => {
@@ -262,6 +359,7 @@ impl Chat {
             }
             AgentEvent::Reply { text } => {
                 self.drop_progress();
+                let reply = text.clone();
                 match self.cur_reply {
                     Some(i) => {
                         if let Some(Msg::Assistant(t)) = self.messages.get_mut(i) {
@@ -273,6 +371,8 @@ impl Chat {
                 self.cur_reply = None;
                 self.thinking_tail.clear();
                 self.busy = false;
+                // 本轮收尾: 到这里才铺 mod 卡片 (只铺一次)
+                self.render_turn_mods(&reply);
                 self.dirty = true;
             }
             AgentEvent::LlmUsage { total_tokens, .. } => {
@@ -280,6 +380,57 @@ impl Chat {
             }
         }
     }
+}
+
+/// 按 slug 合并进列表: 已存在就逐字段覆盖, 但只覆盖"新结果确实有值"的字段
+/// (同 app.js 的 `{...old, ...m}` 语义: 后一次搜索缺的字段不该把已有的冲空)
+fn merge_mod(list: &mut Vec<ModCard>, m: &ModCard) {
+    match list.iter_mut().find(|x| x.slug == m.slug) {
+        Some(old) => {
+            if !m.title.is_empty() {
+                old.title = m.title.clone();
+            }
+            if !m.description.is_empty() {
+                old.description = m.description.clone();
+            }
+            if m.downloads > 0 {
+                old.downloads = m.downloads;
+            }
+            if !m.categories.is_empty() {
+                old.categories = m.categories.clone();
+            }
+            if !m.url.is_empty() {
+                old.url = m.url.clone();
+            }
+            if m.gallery > 0 {
+                old.gallery = m.gallery;
+            }
+            if m.taste.is_some() {
+                old.taste = m.taste;
+            }
+        }
+        None => list.push(m.clone()),
+    }
+}
+
+/// 最终回复里是否"点名"了这个 slug (卡片入选依据之一)。
+/// 用 slug 字符集做边界判断, 避免 sodium 被 sodium-extra / xsodium 顺带命中
+/// (与 app.js 的 mentionsSlug 一致)。
+fn mentions_slug(text: &str, slug: &str) -> bool {
+    if slug.is_empty() {
+        return false;
+    }
+    let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let mut from = 0;
+    while let Some(pos) = text[from..].find(slug).map(|i| i + from) {
+        let before = text[..pos].chars().next_back();
+        let after = text[pos + slug.len()..].chars().next();
+        if boundary(before) && boundary(after) {
+            return true;
+        }
+        from = pos + slug.len();
+    }
+    false
 }
 
 /// 下载量格式化: 12.3M / 5.6K (与 app.js 的 fmtDownloads 一致)
@@ -309,25 +460,35 @@ fn progress_prefix(current: Option<u64>, total: Option<u64>) -> String {
     )
 }
 
-/// 从工具返回的 JSON 里抽 mod 列表。约定与前端 extractMods 相同:
-/// - search_mods:  `{ mods: [{slug,title,description,downloads,categories,icon_url,url,gallery,taste_score}] }`
-/// - build_modpack: `{ mods: [{slug,version,filename,size_mb}] }` (没有标题/图标, 用 slug + 文件名兜底)
+/// 从工具返回的 JSON 里抽 mod 列表 (约定与前端 `extractMods` 完全一致):
+/// 依次看 `recommendations` / `mods` 两个键, 且**首项必须同时有 slug 与 title** 才算
+/// mod 卡片数据 —— `build_modpack` 的结果只有 slug/filename, 故意不收: 它是"哪些进包了"
+/// 的事实 (另走 `built`), 若当成卡片数据会把搜索来的标题/下载量冲掉。
 fn extract_mods(result: Option<&serde_json::Value>) -> Vec<ModCard> {
-    let Some(mods) = result.and_then(|r| r.get("mods")).and_then(|m| m.as_array()) else {
+    let Some(result) = result else {
         return Vec::new();
     };
-    mods.iter()
-        .filter_map(|m| {
-            let slug = m.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            // 组包结果的条目只有 filename/size_mb, 标题缺失时用 slug 顶替
-            let title = m
-                .get("title")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| slug.clone());
-            if title.is_empty() {
-                return None;
+    let mut items: Option<&Vec<serde_json::Value>> = None;
+    for key in ["recommendations", "mods"] {
+        if let Some(arr) = result.get(key).and_then(|v| v.as_array()) {
+            let has_meta = arr.first().is_some_and(|m| {
+                m.get("slug").and_then(|v| v.as_str()).is_some()
+                    && m.get("title").and_then(|v| v.as_str()).is_some()
+            });
+            if has_meta {
+                items = Some(arr);
+                break;
             }
+        }
+    }
+    let Some(items) = items else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|m| {
+            let slug = m.get("slug").and_then(|v| v.as_str())?.to_string();
+            let title = m.get("title").and_then(|v| v.as_str())?.to_string();
             let url = m
                 .get("url")
                 .and_then(|v| v.as_str())
@@ -418,7 +579,9 @@ enum Command {
 enum UiEvent {
     Agent(AgentEvent),
     Snapshot(Snapshot),
-    /// worker 侧的一行提示 (初始化失败/新会话就绪等)
+    /// 新会话已就绪: 对话区与 mod 索引一起重置 (与 Web 版点"新会话"后回到欢迎页一致)
+    SessionReset,
+    /// worker 侧的一行提示 (初始化失败/设置生效等)
     Notice(String),
 }
 
@@ -511,7 +674,7 @@ fn worker(mut cfg: Config, cmd_rx: Receiver<Command>, tx: Sender<UiEvent>, inter
                     match new_agent(&cfg, interrupt.clone()).await {
                         Ok(a) => {
                             agent = a;
-                            let _ = tx.send(UiEvent::Notice("已开启新会话".into()));
+                            let _ = tx.send(UiEvent::SessionReset);
                             let _ = tx.send(UiEvent::Snapshot(snapshot(&agent)));
                         }
                         Err(e) => {
@@ -703,10 +866,8 @@ impl DesktopApp {
             None => text.clone(),
         };
 
+        self.chat.begin_turn();
         self.chat.messages.push(Msg::User(text));
-        self.chat.cur_reply = None;
-        self.chat.drop_progress();
-        self.chat.busy = true;
         self.input.clear();
         let _ = self.commands.send(Command::Chat(payload));
     }
@@ -722,6 +883,15 @@ impl DesktopApp {
                 UiEvent::Snapshot(s) => {
                     self.snapshot = s;
                     self.chat.token_delta = 0;
+                    // 兜底收尾: 出错/被打断时可能没有 Reply 事件, 攒着的卡片不能一直不铺
+                    if self.chat.busy {
+                        self.chat.busy = false;
+                        self.chat.render_turn_mods("");
+                    }
+                    self.refresh_sidebar();
+                }
+                UiEvent::SessionReset => {
+                    self.chat = Chat::welcome();
                     self.refresh_sidebar();
                 }
                 UiEvent::Agent(ev) => self.chat.apply(ev),
@@ -1124,72 +1294,121 @@ fn bubble(ui: &mut egui::Ui, avatar: &str, avatar_color: egui::Color32, fill: eg
     ui.add_space(8.0);
 }
 
+/// 按 "用户消息 = 一轮" 切段绘制: 一轮的全部内容 (工具行/回复/卡片) 用左侧一条竖线
+/// 连成一段, 一眼看出它们属于同一次回答 (对应 Web 版的 .turn-group / .turn-body)。
+/// 没有归属的消息 (欢迎语、打断提示) 直接画, 不进竖线。
 fn draw_messages(ui: &mut egui::Ui, msgs: &[Msg]) {
-    for m in msgs {
-        match m {
-            Msg::User(text) => bubble(ui, "我", skin::ACCENT, skin::ACCENT_SOFT, true, |ui| {
-                ui.label(egui::RichText::new(text).size(13.5));
-            }),
-            Msg::Assistant(text) => bubble(ui, "⛏", skin::ACCENT, skin::BUBBLE, false, |ui| {
-                // 桌面版先按纯文本渲染 (Web 版走 marked 渲染 markdown):
-                // 代码块/列表原样保留, 不做 HTML 富文本
-                ui.label(egui::RichText::new(text).size(13.5));
-            }),
-            Msg::Tool { name, state } => {
-                let (icon, tail, color) = match state {
-                    ToolState::Pending => ("⚙", "调用工具 …", skin::YELLOW),
-                    ToolState::Ok => ("⚙", "完成", skin::GREEN),
-                    ToolState::Fail => ("⚙", "失败", skin::RED),
-                };
-                ui.horizontal(|ui| {
-                    ui.add_space(34.0);
-                    ui.label(
-                        egui::RichText::new(format!("{icon} {name} {tail}"))
-                            .size(12.0)
-                            .family(egui::FontFamily::Monospace)
-                            .color(color),
-                    );
-                });
-                ui.add_space(4.0);
-            }
-            Msg::Progress { text, current, total } => {
-                ui.horizontal(|ui| {
-                    ui.add_space(34.0);
-                    ui.label(
-                        egui::RichText::new(format!("⏳ {}{}", progress_prefix(*current, *total), text))
-                            .size(12.0)
-                            .family(egui::FontFamily::Monospace)
-                            .color(skin::DIM),
-                    );
-                });
-                ui.add_space(4.0);
-            }
-            Msg::Notice(text) => bubble(ui, "⛏", skin::DIM, skin::RAISE, false, |ui| {
-                ui.label(egui::RichText::new(text).size(12.5).color(skin::DIM));
-            }),
-            Msg::Cards(cards) => {
-                ui.horizontal(|ui| {
-                    ui.add_space(34.0);
-                    ui.label(egui::RichText::new("📦").size(14.0));
-                    ui.label(
-                        egui::RichText::new(format!("按 Web 版格式渲染的 mod 卡片 · {}", cards.len()))
-                            .size(11.0)
-                            .color(skin::DIM),
-                    );
-                });
-                ui.add_space(4.0);
-                let total = cards.len();
-                for chunk in (0..total).step_by(2) {
-                    let mut cols = ui.columns(2, |cols| {
-                        for (i, col) in cols.iter_mut().enumerate() {
-                            if let Some(c) = cards.get(chunk + i) {
-                                mod_card(col, c);
-                            }
-                        }
-                    });
-                    let _ = &mut cols;
-                    ui.add_space(6.0);
+    let mut i = 0;
+    while i < msgs.len() {
+        if matches!(msgs[i], Msg::User(_)) {
+            // 本轮到下一个用户消息为止
+            let end = msgs[i + 1..]
+                .iter()
+                .position(|m| matches!(m, Msg::User(_)))
+                .map(|p| i + 1 + p)
+                .unwrap_or(msgs.len());
+            draw_turn(ui, &msgs[i], &msgs[i + 1..end]);
+            i = end;
+        } else {
+            draw_msg(ui, &msgs[i]);
+            i += 1;
+        }
+    }
+}
+
+fn draw_turn(ui: &mut egui::Ui, user: &Msg, body: &[Msg]) {
+    draw_msg(ui, user);
+    if body.is_empty() {
+        return;
+    }
+    let inner = ui.allocate_ui(egui::vec2(ui.available_width(), 0.0), |ui| {
+        ui.horizontal_top(|ui| {
+            ui.add_space(9.0); // 竖线占用的通道: 压在 padding 里, 不盖任何气泡背景
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                for m in body {
+                    draw_msg(ui, m);
                 }
+            });
+        });
+    });
+    let rect = inner.response.rect;
+    if rect.height() > 6.0 {
+        let x = rect.left() + 2.0;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x, rect.top() + 2.0),
+                egui::pos2(x + 2.0, rect.bottom() - 2.0),
+            ),
+            egui::Rounding::same(1.0),
+            skin::RAIL,
+        );
+    }
+}
+
+fn draw_msg(ui: &mut egui::Ui, m: &Msg) {
+    match m {
+        Msg::User(text) => bubble(ui, "我", skin::ACCENT, skin::ACCENT_SOFT, true, |ui| {
+            ui.label(egui::RichText::new(text).size(13.5));
+        }),
+        Msg::Assistant(text) => bubble(ui, "⛏", skin::ACCENT, skin::BUBBLE, false, |ui| {
+            // 桌面版先按纯文本渲染 (Web 版走 marked 渲染 markdown):
+            // 代码块/列表原样保留, 不做 HTML 富文本
+            ui.label(egui::RichText::new(text).size(13.5));
+        }),
+        Msg::Tool { name, state, found } => {
+            let (icon, tail, color) = match state {
+                ToolState::Pending => ("⚙", "调用工具 …", skin::YELLOW),
+                ToolState::Ok => ("⚙", "完成", skin::GREEN),
+                ToolState::Fail => ("⚙", "失败", skin::RED),
+            };
+            let mut text = format!("{icon} {name} {tail}");
+            if *found > 0 {
+                text.push_str(&format!(" · 找到 {found} 个候选"));
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(34.0);
+                ui.label(
+                    egui::RichText::new(text)
+                        .size(12.0)
+                        .family(egui::FontFamily::Monospace)
+                        .color(color),
+                );
+            });
+            ui.add_space(4.0);
+        }
+        Msg::Progress { text, current, total } => {
+            ui.horizontal(|ui| {
+                ui.add_space(34.0);
+                ui.label(
+                    egui::RichText::new(format!("⏳ {}{}", progress_prefix(*current, *total), text))
+                        .size(12.0)
+                        .family(egui::FontFamily::Monospace)
+                        .color(skin::DIM),
+                );
+            });
+            ui.add_space(4.0);
+        }
+        Msg::Notice(text) => bubble(ui, "⛏", skin::DIM, skin::RAISE, false, |ui| {
+            ui.label(egui::RichText::new(text).size(12.5).color(skin::DIM));
+        }),
+        Msg::Cards { caption, cards } => {
+            ui.horizontal(|ui| {
+                ui.add_space(34.0);
+                ui.label(egui::RichText::new("📦").size(14.0));
+                ui.label(egui::RichText::new(caption).size(11.5).color(skin::DIM));
+            });
+            ui.add_space(4.0);
+            let total = cards.len();
+            for chunk in (0..total).step_by(2) {
+                ui.columns(2, |cols| {
+                    for (i, col) in cols.iter_mut().enumerate() {
+                        if let Some(c) = cards.get(chunk + i) {
+                            mod_card(col, c);
+                        }
+                    }
+                });
+                ui.add_space(6.0);
             }
         }
     }
@@ -1264,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_mods_reads_search_and_build_shapes() {
+    fn extract_mods_matches_web_contract_when_parsing_results() {
         let search = serde_json::json!({
             "query_used": "优化",
             "mods": [{
@@ -1281,16 +1500,22 @@ mod tests {
         assert_eq!(cards[0].gallery, 2);
         assert_eq!(cards[0].taste, Some(4.2));
 
-        // 组包结果没有 title/url: 用 slug 顶替标题, 链接回落到 modrinth
+        // 组包结果 (只有 slug/filename, 没有 title) 不算卡片数据: 否则会把搜索来的元数据冲掉
         let build = serde_json::json!({ "mods": [{ "slug": "jei", "version": "1.0", "filename": "jei.jar", "size_mb": 1.2 }] });
-        let cards = extract_mods(Some(&build));
+        assert!(extract_mods(Some(&build)).is_empty());
+
+        // 推荐工具用的键是 recommendations, 同样按 slug+title 判定
+        let rec = serde_json::json!({ "recommendations": [{
+            "slug": "iris", "title": "Iris", "description": "光影", "downloads": 100
+        }] });
+        let cards = extract_mods(Some(&rec));
         assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].title, "jei");
-        assert_eq!(cards[0].url, "https://modrinth.com/mod/jei");
-        assert_eq!(cards[0].downloads, 0);
+        assert_eq!(cards[0].title, "Iris");
+        assert_eq!(cards[0].url, "https://modrinth.com/mod/iris");
 
         // 没有 mods 字段 / 空数组都不渲染卡片
         assert!(extract_mods(Some(&serde_json::json!({ "total_hits": 0 }))).is_empty());
+        assert!(extract_mods(Some(&serde_json::json!({ "mods": [] }))).is_empty());
         assert!(extract_mods(None).is_empty());
     }
 
@@ -1302,16 +1527,18 @@ mod tests {
         }] })
     }
 
-    /// 一轮完整工具调用: 工具行 → 进度行(原地更新) → 结果(染色+撤进度+插卡片) → 流式回复
+    /// 一轮完整工具调用: 工具行 → 进度行(原地更新) → 结果(染色+撤进度, 卡片先攒着) →
+    /// 流式回复 → 收尾统一铺一屏卡片
     #[test]
     fn chat_assembles_one_tool_turn_like_web_ui() {
         let mut c = Chat::welcome();
+        c.begin_turn();
         let head = c.messages.len(); // 欢迎语之后的位置
 
         c.apply(AgentEvent::ToolCall { name: "search_mods".into(), args: "{}".into() });
         assert!(c.busy);
         assert_eq!(c.messages.len(), head + 1);
-        assert!(matches!(&c.messages[head], Msg::Tool { name, state: ToolState::Pending } if name == "search_mods"));
+        assert!(matches!(&c.messages[head], Msg::Tool { name, state: ToolState::Pending, .. } if name == "search_mods"));
 
         // 同一次工具调用内的多条 progress 原地更新同一行, 不新开行
         c.apply(AgentEvent::Progress { text: "收集 sodium (1/8)".into(), current: Some(1), total: Some(8) });
@@ -1326,29 +1553,113 @@ mod tests {
             None => panic!("进度行丢了"),
         }
 
-        // 工具结果: 工具行转 ok + 进度行撤掉 + mod 卡片插入 (只剩 工具行 + 卡片)
+        // 工具结果: 工具行转 ok 并带上"找到 N 个候选", 进度行撤掉;
+        // mod 卡片**不在这里铺** —— 轮内只攒, 收尾才铺 (只剩工具行一条)
         c.apply(AgentEvent::ToolResult {
             name: "search_mods".into(),
             ok: true,
             result: Some(hit_json()),
         });
-        assert_eq!(c.messages.len(), head + 2);
-        assert!(matches!(&c.messages[head], Msg::Tool { state: ToolState::Ok, .. }));
-        assert!(matches!(&c.messages[head + 1], Msg::Cards(v) if v.len() == 1 && v[0].title == "Sodium"));
+        assert_eq!(c.messages.len(), head + 1);
+        assert!(matches!(&c.messages[head], Msg::Tool { state: ToolState::Ok, found: 1, .. }));
+        assert!(!c.messages.iter().any(|m| matches!(m, Msg::Cards { .. })), "轮内不该铺卡片");
 
         // 流式增量拼进同一个气泡, Reply 用完整文本覆盖而不是新增气泡
         c.apply(AgentEvent::ReplyDelta { text: "找到".into() });
-        c.apply(AgentEvent::ReplyDelta { text: "了 Sodium".into() });
+        c.apply(AgentEvent::ReplyDelta { text: "了 sodium".into() });
+        assert_eq!(c.messages.len(), head + 2);
+        c.apply(AgentEvent::Reply { text: "找到了 sodium".into() });
+        // 回复气泡 + 一屏卡片
         assert_eq!(c.messages.len(), head + 3);
-        c.apply(AgentEvent::Reply { text: "找到了 Sodium".into() });
-        assert_eq!(c.messages.len(), head + 3);
-        assert!(matches!(c.messages.last(), Some(Msg::Assistant(t)) if t == "找到了 Sodium"));
+        assert!(matches!(&c.messages[head + 1], Msg::Assistant(t) if t == "找到了 sodium"));
+        assert!(matches!(&c.messages[head + 2], Msg::Cards { caption, cards }
+            if caption == "本轮推荐的 mod · 1" && cards.len() == 1 && cards[0].title == "Sodium"));
 
         assert!(!c.busy);
         assert_eq!(c.status(), "就绪");
         // 一轮结束要让侧栏重扫 (整合包列表/口味库), 且只上报一次
         assert!(c.take_dirty());
         assert!(!c.take_dirty());
+    }
+
+    /// mod 卡片延后: 一轮里搜几次都不铺, 收尾只铺一屏 —— 这是用户最在意的体验点
+    #[test]
+    fn mod_cards_are_deferred_to_turn_end() {
+        let mut c = Chat::welcome();
+        c.begin_turn();
+        let head = c.messages.len();
+        // 两次搜索 (换词重试的典型场景): 全程不铺卡片, 工具行各自报"找到几个"
+        for round in 0..2 {
+            c.apply(AgentEvent::ToolCall { name: "search_mods".into(), args: "{}".into() });
+            c.apply(AgentEvent::ToolResult { name: "search_mods".into(), ok: true, result: Some(hit_json()) });
+            assert_eq!(c.messages.iter().filter(|m| matches!(m, Msg::Cards { .. })).count(), 0, "第 {round} 次搜索后不该铺卡片");
+        }
+        assert!(matches!(&c.messages[head], Msg::Tool { found: 1, .. }));
+        assert_eq!(c.messages.len(), head + 2);
+
+        // 收尾只铺一屏; 回复没点名 sodium → 兜底标题 + 候选池里只有它
+        c.apply(AgentEvent::Reply { text: "这两组结果里有一个能用的".into() });
+        let groups: Vec<&Msg> = c.messages.iter().filter(|m| matches!(m, Msg::Cards { .. })).collect();
+        assert_eq!(groups.len(), 1);
+        assert!(matches!(groups[0], Msg::Cards { caption, cards }
+            if caption == "本轮候选 mod · 1" && cards.len() == 1));
+    }
+
+    /// 本轮组过包: 只铺真正进包的那几个; 组包结果只有 slug, 靠会话索引补标题 (跨轮也能补)
+    #[test]
+    fn packed_mods_win_and_cross_turn_index_fills_title() {
+        let mut c = Chat::welcome();
+        // 第一轮: 搜到 sodium 进索引, 没组包 → 收尾按候选铺
+        c.begin_turn();
+        c.apply(AgentEvent::ToolCall { name: "search_mods".into(), args: "{}".into() });
+        c.apply(AgentEvent::ToolResult { name: "search_mods".into(), ok: true, result: Some(hit_json()) });
+        c.apply(AgentEvent::Reply { text: "先看看这些".into() });
+
+        // 第二轮: 直接组包, 结果只有 slug/filename → 标题/下载量从第一轮的索引补回来
+        c.begin_turn();
+        c.apply(AgentEvent::ToolCall { name: "build_modpack".into(), args: "{}".into() });
+        c.apply(AgentEvent::ToolResult {
+            name: "build_modpack".into(),
+            ok: true,
+            result: Some(serde_json::json!({ "mods": [{ "slug": "sodium", "version": "1.0", "filename": "sodium.jar" }] })),
+        });
+        c.apply(AgentEvent::Reply { text: "打包完成".into() });
+        assert!(matches!(c.messages.last(), Some(Msg::Cards { caption, cards })
+            if caption == "已加入整合包的 mod · 1"
+                && cards[0].title == "Sodium"      // 标题来自上一轮的搜索结果
+                && cards[0].downloads == 1000));
+
+        // 第三轮: 进包的是索引里没有的 (自动补全的前置依赖) → 回落到 slug 当标题
+        c.begin_turn();
+        c.apply(AgentEvent::ToolCall { name: "build_modpack".into(), args: "{}".into() });
+        c.apply(AgentEvent::ToolResult {
+            name: "build_modpack".into(),
+            ok: true,
+            result: Some(serde_json::json!({ "mods": [{ "slug": "fabric-api" }] })),
+        });
+        c.apply(AgentEvent::Reply { text: "打包完成".into() });
+        assert!(matches!(c.messages.last(), Some(Msg::Cards { caption, cards })
+            if caption == "已加入整合包的 mod · 1" && cards[0].title == "fabric-api"));
+    }
+
+    /// slug 点名要按词边界匹配: sodium 不能被 sodium-extra / xsodium 顺带命中
+    #[test]
+    fn slug_mention_needs_word_boundary() {
+        assert!(mentions_slug("推荐 sodium 这个", "sodium"));
+        assert!(mentions_slug("看看 (sodium)。", "sodium"));
+        assert!(!mentions_slug("推荐 sodium-extra 这个", "sodium"));
+        assert!(!mentions_slug("推荐 xsodium 这个", "sodium"));
+        assert!(!mentions_slug("", "sodium"));
+        assert!(!mentions_slug("sodium", ""));
+    }
+
+    /// 纯聊天轮 (没有任何工具结果) 不该凭空铺一屏卡片
+    #[test]
+    fn plain_turn_renders_no_cards() {
+        let mut c = Chat::welcome();
+        c.begin_turn();
+        c.apply(AgentEvent::Reply { text: "你好, 想玩什么版本?".into() });
+        assert!(!c.messages.iter().any(|m| matches!(m, Msg::Cards { .. })));
     }
 
     /// 工具行之后的文本必须另起气泡, 否则回复会续写到工具行上方的旧气泡里
