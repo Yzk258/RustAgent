@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod cli;
 pub mod config;
+pub mod desktop;
 pub mod llm;
 pub mod pipeline;
 pub mod providers;

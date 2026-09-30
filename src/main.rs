@@ -6,7 +6,7 @@
 
 use rustagent::prelude::*;
 use rustagent::{
-    cli, config,
+    cli, config, desktop,
     providers::modrinth,
     selftest,
     tools::{self, ToolRegistry},
@@ -25,6 +25,9 @@ async fn main() -> Result<()> {
     if args.len() > 1 && args[1] == "ui" {
         return ui::serve(cfg, "config.toml").await;
     }
+    if args.len() > 1 && args[1] == "desktop" {
+        return desktop::run(cfg);
+    }
     if args.len() > 2 && args[1] == "repair" {
         let client = modrinth::ModrinthClient::new()?;
         let registry = ToolRegistry::new(client, None, &cfg.output.download_dir, cfg.db_path());
@@ -36,7 +39,7 @@ async fn main() -> Result<()> {
     }
     if args.len() > 1 {
         bail!(
-            "未知子命令 '{}' (可用: selftest / ui / repair; 不带参数进入交互对话)",
+            "未知子命令 '{}' (可用: selftest / ui / desktop / repair; 不带参数进入交互对话)",
             args[1]
         );
     }
