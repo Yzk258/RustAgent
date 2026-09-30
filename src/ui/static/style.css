@@ -289,6 +289,13 @@ html { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 10px;
 }
+/* 卡片组标题: 横跨整行, 说明这批卡片是哪一轮的什么结果 */
+.mod-cards-caption {
+  grid-column: 1 / -1;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
 .mod-card {
   border: 1px solid var(--border-soft); border-radius: 11px; padding: 10px;
   background: var(--bg-raise); transition: border-color 0.15s, transform 0.15s;
@@ -388,6 +395,37 @@ html { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
   animation: msg-in 0.22s ease both;
 }
 .msg-row.user { flex-direction: row-reverse; }
+
+/* 一轮对话分组: 用户消息下面挂着本轮的全部内容 (工具行/回复/mod 卡片),
+   .turn-body 左侧一条渐变竖线把这些行连成一段, 一眼看出它们属于同一次回答 */
+.turn-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.turn-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-left: 14px; /* 给竖线留出通道, 竖线不会压到任何行的背景上 */
+}
+.turn-body::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(
+    180deg,
+    rgba(109, 141, 255, 0.05),
+    rgba(109, 141, 255, 0.45) 12%,
+    rgba(139, 92, 246, 0.4) 88%,
+    rgba(139, 92, 246, 0.05)
+  );
+}
 @keyframes msg-in {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }

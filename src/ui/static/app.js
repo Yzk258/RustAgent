@@ -35,6 +35,20 @@ const SET = Object.fromEntries(
 // 当前对话轮的 fetch 控制器: 切换会话时用它丢弃旧轮的流式输出
 let chatController = null;
 
+// 当前对话轮的行挂载点: 一轮里的助手回复/工具行/mod 卡片都挂在同一个 .turn-body 里,
+// 容器左侧的竖线把它们连成一段, 直观表示"这些内容属于同一次回答"。
+// null = 不在分组里 (欢迎页/未开始新一轮), 此时各行直接挂到 #messages。
+let turnMount = null;
+
+// 会话级 mod 元数据索引 (slug -> mod 对象): build_modpack 的返回只有 slug/版本/文件名,
+// 靠这个索引把之前搜索到的标题/图标/描述补回来渲染卡片 (新建会话时清空)。
+const modIndex = new Map();
+
+// 本轮后续的行挂到哪: 分组内 = .turn-body, 分组外 = #messages
+function mountEl() {
+  return turnMount || DOM.messages;
+}
+
 const API = {
   request: async (path, options = {}) => {
     const response = await fetch(path, options);
@@ -195,21 +209,46 @@ function scrollBottom() {
   m.scrollTop = m.scrollHeight;
 }
 
-function addMsg(cls, html) {
-  removeWelcome();
-  // 消息行 = 头像 + 气泡; 返回气泡本身 (流式 reply_delta 直接改 textContent)
+// 一个消息行 = 头像 + 气泡, 返回 { row, bubble } (bubble 供流式 reply_delta 改 textContent)
+function makeRow(cls, html) {
   const row = document.createElement("div");
   row.className = "msg-row " + cls;
   const avatar = document.createElement("div");
   avatar.className = "avatar";
   avatar.textContent = cls === "user" ? "我" : cls === "error" ? "!" : "⛏";
-  const div = document.createElement("div");
-  div.className = "msg " + cls + (cls === "assistant" ? " md" : "");
-  div.innerHTML = html;
-  row.append(avatar, div);
-  DOM.messages.appendChild(row);
+  const bubble = document.createElement("div");
+  bubble.className = "msg " + cls + (cls === "assistant" ? " md" : "");
+  bubble.innerHTML = html;
+  row.append(avatar, bubble);
+  return { row, bubble };
+}
+
+function addMsg(cls, html) {
+  removeWelcome();
+  const { row, bubble } = makeRow(cls, html);
+  mountEl().appendChild(row);
   scrollBottom();
-  return div;
+  return bubble;
+}
+
+// 开一轮: 用户消息 + 空的 .turn-body (本轮后续所有行都挂进这个 body, 左侧竖线连成一段)。
+// 返回本轮状态对象, 供 handleEvent 收集 mod 结果 / 收尾统一渲染卡片。
+function beginTurn(userText) {
+  removeWelcome();
+  const group = document.createElement("div");
+  group.className = "turn-group";
+  const body = document.createElement("div");
+  body.className = "turn-body";
+  group.append(makeRow("user", escapeHtml(userText)).row, body);
+  DOM.messages.appendChild(group);
+  turnMount = body;
+  scrollBottom();
+  return { mods: new Map(), built: null, rendered: false };
+}
+
+// 收一轮: 之后的行不再纳入本组 (下一条用户消息会新开一组)
+function endTurn() {
+  turnMount = null;
 }
 
 function addToolLine(name) {
@@ -217,7 +256,7 @@ function addToolLine(name) {
   const div = document.createElement("div");
   div.className = "tool-line pending";
   div.textContent = `⚙ 调用工具 ${name} …`;
-  DOM.messages.appendChild(div);
+  mountEl().appendChild(div);
   scrollBottom();
   return div;
 }
@@ -227,7 +266,7 @@ function addProgressLine() {
   removeWelcome();
   const div = document.createElement("div");
   div.className = "tool-line progress";
-  DOM.messages.appendChild(div);
+  mountEl().appendChild(div);
   return div;
 }
 
@@ -277,7 +316,7 @@ function showThinking(thinking) {
   const div = document.createElement("div");
   div.className = "tool-line progress thinking";
   div.textContent = "思考中";
-  DOM.messages.appendChild(div);
+  mountEl().appendChild(div);
   scrollBottom();
   thinking.el = div;
   thinking.start = Date.now();
@@ -544,8 +583,7 @@ function setBusy(b) {
 // 工具试用: POST /api/tool/trial, NDJSON 流式接收 tool_output + analysis_delta。
 // 渲染: 用户消息 → [工具输出折叠区块] → [AI 分析 markdown 气泡 (流式)]
 async function sendTrial(toolName, prompt) {
-  removeWelcome();
-  addMsg("user", escapeHtml(prompt));
+  beginTurn(prompt); // 用户消息 + 本轮 .turn-body (试用输出与分析都挂进去)
   // 工具调用行 (与正常对话一致的视觉)
   const toolLine = addToolLine(toolName);
   // 工具输出区块 (折叠, 展示原始 JSON)
@@ -558,7 +596,7 @@ async function sendTrial(toolName, prompt) {
   outputDiv.className = "msg assistant trial-output";
   outputDiv.innerHTML = '<div class="trial-output-head">📋 工具标准输出</div><pre class="trial-output-json">等待执行…</pre>';
   outputRow.append(outputAvatar, outputDiv);
-  DOM.messages.appendChild(outputRow);
+  mountEl().appendChild(outputRow);
   const jsonEl = outputDiv.querySelector(".trial-output-json");
   // AI 分析气泡 (流式) + 思考提示 (工具输出后到 LLM 首 token 的空窗期提示)
   let analysisEl = null;
@@ -628,6 +666,7 @@ async function sendTrial(toolName, prompt) {
   } finally {
     chatController = null;
     hideThinking(thinking);
+    endTurn();
     setBusy(false);
     refreshSidebar();
     DOM.input.focus();
@@ -661,7 +700,7 @@ async function send() {
     return;
   }
 
-  addMsg("user", escapeHtml(text));
+  const turn = beginTurn(text); // 用户消息 + 本轮的 .turn-body (后续行都挂在里面)
   const pending = []; // { name, el, done }; replyEl 属性 = 当前流式回复气泡 (本轮共用)
   const progress = { el: null }; // 当前实时进展行 (整个 turn 共用一个, 原地更新)
   const thinking = { el: null, timer: null }; // "思考中"行状态 + 每秒计时器
@@ -705,7 +744,7 @@ async function send() {
         // NDJSON 流中畸形行 (网络中断半行/代理截断) 跳过, 不中断整轮流式
         let ev;
         try { ev = JSON.parse(line); } catch { continue; }
-        handleEvent(ev, pending, progress, thinking);
+        handleEvent(ev, turn, pending, progress, thinking);
       }
     }
   } catch (e) {
@@ -716,6 +755,9 @@ async function send() {
   } finally {
     chatController = null;
     hideThinking(thinking);
+    // 兜底: 流被截断 (没收到 done 事件) 时也把本轮找到的 mod 铺出来, 不漏结果
+    renderTurnMods(turn, "");
+    endTurn();
     setBusy(false);
     refreshSidebar();
     DOM.input.focus();
@@ -735,9 +777,70 @@ function extractMods(result) {
   return null;
 }
 
-// 把 mod 列表渲染成结构化卡片网格, 插入对话区 (工具行下方, AI 回复上方)。
+/* ---------- 本轮 mod 结果: 先攒后渲染 ----------
+   以前每个 search_mods 结果都立刻铺一屏卡片, 一轮里搜几次就刷出好几屏, 很吵;
+   现在轮内只把结果攒起来, 等本轮结束 (最终回复/收尾) 才渲染一次"最终确定的那些"。 */
+
+// 把一次工具结果里的 mod 收进本轮 + 会话索引。返回本次结果里 mod 的个数 (0 = 无列表)。
+function collectMods(turn, result) {
+  const mods = extractMods(result);
+  if (!mods) return 0;
+  for (const m of mods) {
+    if (!m?.slug) continue;
+    modIndex.set(m.slug, { ...modIndex.get(m.slug), ...m });
+    turn.mods.set(m.slug, { ...turn.mods.get(m.slug), ...m });
+  }
+  return mods.length;
+}
+
+// 最终回复里是否"点名"了这个 slug (卡片入选依据之一)。
+// 用 slug 字符集做边界判断, 避免 sodium 被 sodium-extra 顺带命中。
+function mentionsSlug(text, slug) {
+  for (let i = text.indexOf(slug); i >= 0; i = text.indexOf(slug, i + 1)) {
+    const before = text[i - 1] || "";
+    const after = text[i + slug.length] || "";
+    if (!/[0-9a-z_-]/i.test(before) && !/[0-9a-z_-]/i.test(after)) return true;
+  }
+  return false;
+}
+
+// 本轮该渲染哪几个 mod (按优先级):
+// 1. 本轮组过包 -> 真正进包的那几个 (用户已确认, 最"确凿");
+// 2. 否则 -> 最终回复正文点到名的那些 (AI 从候选里挑出来讲的);
+// 3. 都没有 -> 兜底渲染本轮搜到的全部候选。
+function finalMods(turn, replyText) {
+  if (turn.built?.length) {
+    // 组包结果只有 slug: 用索引补标题/图标; 索引里没有的 (自动补全的前置依赖) 不铺卡片
+    const known = turn.built.map((s) => modIndex.get(s)).filter(Boolean);
+    if (known.length) {
+      return { mods: known, caption: `已加入整合包的 mod · ${known.length}` };
+    }
+    return {
+      mods: turn.built.map((slug) => ({ slug, title: slug })),
+      caption: `已加入整合包的 mod · ${turn.built.length}`,
+    };
+  }
+  const pool = [...turn.mods.values()];
+  if (replyText) {
+    const named = pool.filter((m) => mentionsSlug(replyText, m.slug));
+    if (named.length) return { mods: named, caption: `本轮推荐的 mod · ${named.length}` };
+  }
+  return pool.length ? { mods: pool, caption: `本轮候选 mod · ${pool.length}` } : null;
+}
+
+// 本轮收尾: 卡片只在最终回复之后统一铺一次 (同一轮只出现一屏 mod 列表)
+function renderTurnMods(turn, replyText) {
+  if (turn.rendered) return;
+  const pick = finalMods(turn, replyText);
+  if (!pick) return;
+  turn.rendered = true;
+  renderModCards(pick.mods, pick.caption);
+}
+
+// 把 mod 列表渲染成结构化卡片网格, 插入当前轮的挂载点。
 // 每张卡片: 图标 + 标题链接(跳 Modrinth) + 描述 + 下载量 + 可展开截图(gallery)。
-function renderModCards(mods) {
+// caption 为卡片组标题 (如 "已加入整合包的 mod · 12"), 作为网格首行横跨整行。
+function renderModCards(mods, caption) {
   const row = document.createElement("div");
   row.className = "msg-row assistant";
   const avatar = document.createElement("div");
@@ -745,6 +848,12 @@ function renderModCards(mods) {
   avatar.textContent = "📦";
   const grid = document.createElement("div");
   grid.className = "msg assistant mod-cards";
+  if (caption) {
+    const cap = document.createElement("div");
+    cap.className = "mod-cards-caption";
+    cap.textContent = caption;
+    grid.appendChild(cap);
+  }
   for (const m of mods) {
     const card = document.createElement("div");
     card.className = "mod-card";
@@ -790,11 +899,11 @@ function renderModCards(mods) {
     grid.appendChild(card);
   }
   row.append(avatar, grid);
-  DOM.messages.appendChild(row);
+  mountEl().appendChild(row);
   scrollBottom();
 }
 
-function handleEvent(ev, pending, progress, thinking) {
+function handleEvent(ev, turn, pending, progress, thinking) {
   switch (ev.type) {
     case "tool_call":
       hideThinking(thinking);
@@ -813,10 +922,14 @@ function handleEvent(ev, pending, progress, thinking) {
         t.el.textContent = `⚙ ${ev.name} ${ev.ok ? "完成" : "失败"}`;
       }
       clearProgress(progress);
-      // 工具返回数据含 mod 列表时, 渲染结构化卡片 (图标+链接+截图) 插入对话区,
-      // 让对话栏的 mod 也可点击跳转、看图片, 而非只有 AI 纯文字描述
-      const mods = extractMods(ev.result);
-      if (mods) renderModCards(mods);
+      // 工具结果里的 mod 列表先攒着不渲染 —— 本轮结束时统一铺一次卡片 (见 renderTurnMods),
+      // 工具行上给一个"找到几个"的即时反馈, 不丢"每步都有回音"
+      const found = collectMods(turn, ev.result);
+      if (t && found) t.el.textContent += ` · 找到 ${found} 个候选`;
+      // 本轮组过包: 记下真正进包的 slug, 收尾时只渲染这几个 (用户已确认的那批)
+      if (ev.name === "build_modpack" && ev.ok && Array.isArray(ev.result?.mods)) {
+        turn.built = ev.result.mods.map((m) => m?.slug).filter(Boolean);
+      }
       // 工具结果要再交给 LLM 分析, 又进入思考空窗期
       showThinking(thinking);
       break;
@@ -858,6 +971,8 @@ function handleEvent(ev, pending, progress, thinking) {
       } else {
         addMsg("assistant", renderText(ev.text));
       }
+      // 本轮到此结束: 攒下的 mod 一次性铺在最终回复之后 (同一轮只出现一屏列表)
+      renderTurnMods(turn, ev.text);
       break;
     case "error":
       hideThinking(thinking);
@@ -871,6 +986,8 @@ function handleEvent(ev, pending, progress, thinking) {
     case "done":
       hideThinking(thinking);
       clearProgress(progress);
+      // 兜底: 本轮没有 reply 事件 (中途报错) 时, 找到的 mod 也要铺出来
+      renderTurnMods(turn, "");
       DOM["stat-usage"].textContent = ev.usage;
       if (ev.saved) loadSessions(); // 本轮已自动保存, 立即刷新会话列表
       break;
@@ -892,6 +1009,8 @@ async function newSession() {
     toast(r.message, !r.ok);
     if (r.ok) {
       DOM.messages.innerHTML = "";
+      turnMount = null;
+      modIndex.clear(); // 新会话: 丢掉上一会话的 mod 元数据缓存
       showWelcome();
       refreshSidebar();
     }
@@ -907,6 +1026,7 @@ async function importSession(name) {
     const r = await API.post("/api/session/import", { name });
     toast(r.message, !r.ok);
     if (r.ok && Array.isArray(r.messages)) {
+      modIndex.clear(); // 换会话: 历史里没有 mod 元数据, 索引一并重置
       renderHistory(r.messages);
       loadInfo();
     }
@@ -915,21 +1035,23 @@ async function importSession(name) {
   }
 }
 
-// 把导入的历史消息渲染到聊天区
+// 把导入的历史消息渲染到聊天区 (同样按"用户消息 = 一轮"分组, 左侧竖线连成一段)
 function renderHistory(messages) {
   DOM.messages.innerHTML = "";
+  turnMount = null;
   for (const m of messages) {
     if (m.kind === "user") {
-      addMsg("user", escapeHtml(m.text));
+      beginTurn(m.text);
     } else if (m.kind === "assistant") {
       addMsg("assistant", renderText(m.text));
     } else {
-  const div = document.createElement("div");
+      const div = document.createElement("div");
       div.className = "tool-line ok";
       div.textContent = "⚙ " + m.text;
-  DOM.messages.appendChild(div);
+      mountEl().appendChild(div);
     }
   }
+  endTurn();
   if (!messages.length) showWelcome();
   scrollBottom();
 }
