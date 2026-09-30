@@ -182,7 +182,7 @@ cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # �
 | `modIndex`（跨轮 slug → 元数据）          | `Chat::mod_index` + `merge_mod()`       | 组包结果只有 slug，靠会话索引补回标题/下载量；逐字段合并（后一次缺的字段不冲掉已有的）     |
 | `#presetbar` 版本 / 加载器 / 数量          | `ui_input()` 上半                      | 复用同一个 `pipeline::preset_prefix()` 生成 `[界面预设: …]` 前缀                          |
 | 输入栏 + ⏸ 打断                           | `ui_input()` 下半                      | Enter 发送、Shift+Enter 换行，处理中变成"打断"                                           |
-| 设置弹窗 ⚙                                | `ui_settings()`                         | 字段一致；保存走 `config::save_llm()` 写回 `config.toml` 并热更新 agent（不重启）          |
+| 设置弹窗 ⚙                                | `ui_settings()`                         | 字段一致；保存走 `config::save_llm()` 写回 `config.toml` 并热更新 agent（不重启）。**API Key 是密码框、默认留空、只显示 `***末4位`**：留空 = 保持不变，明文永不进界面（与 Web 版 `type=password` + `/api/settings` 脱敏同一套约定） |
 | `handleEvent()` 事件分发                  | `Chat::apply()`                         | 顺序规则对齐：工具调用后另起气泡、进度行用完即撤、`reply` 完整文本覆盖流式累积            |
 
 有意保留的差异（避免重复造轮子）：

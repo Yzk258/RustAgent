@@ -459,21 +459,28 @@ pub async fn session_open(State(state): SharedState) -> Json<Value> {
 // 设置接口: 运行时查看 / 修改 LLM 配置 (热更新 + 写回 config.toml)
 // ---------------------------------------------------------------------------
 
+/// API Key 脱敏: 返回 (是否已设置, 掩码串)。只保留末 4 位, 绝不回传完整 key。
+/// 按**字符**切而不是按字节切 —— key 里含非 ASCII 时按字节切会在切片处 panic。
+pub(crate) fn mask_api_key(key: &str) -> (bool, String) {
+    let n = key.chars().count();
+    if n == 0 {
+        return (false, String::new());
+    }
+    if n <= 4 {
+        return (true, "***".to_string());
+    }
+    let tail: String = key.chars().skip(n - 4).collect();
+    (true, format!("***{tail}"))
+}
+
 /// 当前 LLM 设置。api_key 脱敏: 只回末 4 位 + 是否已设置, 绝不回传完整 key。
 pub async fn settings(State(state): SharedState) -> Json<Value> {
     let cfg = state.cfg.read().await;
-    let key = cfg.llm.api_key.as_str();
-    let masked = if key.len() > 4 {
-        format!("***{}", &key[key.len() - 4..])
-    } else if !key.is_empty() {
-        "***".to_string()
-    } else {
-        String::new()
-    };
+    let (api_key_set, masked) = mask_api_key(&cfg.llm.api_key);
     Json(json!({
         "model": cfg.llm.model,
         "base_url": cfg.llm.base_url,
-        "api_key_set": !key.is_empty(),
+        "api_key_set": api_key_set,
         "api_key_masked": masked,
         "context_length": cfg.llm.context_length,
         "price_input_per_m": cfg.llm.price_input_per_m,
@@ -723,4 +730,20 @@ pub async fn tool_trial(
         .header("cache-control", "no-cache")
         .body(Body::from_stream(stream))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_api_key;
+
+    /// /api/settings 只回末 4 位; 空 key / 短 key / 非 ASCII key 都不能 panic
+    /// (旧实现按字节 `&key[key.len() - 4..]` 切, 非 ASCII 会在切片处炸)
+    #[test]
+    fn mask_api_key_only_keeps_last_four_chars() {
+        assert_eq!(mask_api_key(""), (false, String::new()));
+        assert_eq!(mask_api_key("abc"), (true, "***".to_string()));
+        assert_eq!(mask_api_key("abcd"), (true, "***".to_string()));
+        assert_eq!(mask_api_key("sk-live-abcdef123456"), (true, "***3456".to_string()));
+        assert_eq!(mask_api_key("密钥密钥密钥"), (true, "***密钥密钥".to_string()));
+    }
 }

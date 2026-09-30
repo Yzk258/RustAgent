@@ -721,9 +721,27 @@ fn snapshot(agent: &crate::agent::Agent) -> Snapshot {
 // 设置表单 (对应 Web 版的设置弹窗, 字段与 config.toml 的 [llm] 段一致)
 // ---------------------------------------------------------------------------
 
+/// API Key 脱敏: 只保留末 4 位 (与 Web 版 /api/settings 同一约定)。
+/// 按**字符**切而不是按字节切 —— 按字节切遇到非 ASCII 的 key 会在切片处 panic。
+fn mask_key(key: &str) -> (bool, String) {
+    let n = key.chars().count();
+    if n == 0 {
+        return (false, String::new());
+    }
+    if n <= 4 {
+        return (true, "***".to_string());
+    }
+    let tail: String = key.chars().skip(n - 4).collect();
+    (true, format!("***{tail}"))
+}
+
 struct SettingsForm {
     base_url: String,
-    api_key: String,
+    /// 用户新填的 key: 默认留空, 只有真敲了新 key 才替换 (同 Web 版"留空保持不变")。
+    /// 表单里**从不持有完整 key**, 只存脱敏串 —— 这样任何一处渲染都不可能把它漏到屏幕上。
+    api_key_input: String,
+    api_key_set: bool,
+    api_key_masked: String,
     model: String,
     context_length: String,
     price_input: String,
@@ -736,9 +754,12 @@ struct SettingsForm {
 
 impl SettingsForm {
     fn from(llm: &LlmConfig, curseforge: bool) -> Self {
+        let (api_key_set, api_key_masked) = mask_key(&llm.api_key);
         Self {
             base_url: llm.base_url.clone(),
-            api_key: llm.api_key.clone(),
+            api_key_input: String::new(), // 绝不预填明文
+            api_key_set,
+            api_key_masked,
             model: llm.model.clone(),
             context_length: llm.context_length.to_string(),
             price_input: llm.price_input_per_m.to_string(),
@@ -750,13 +771,34 @@ impl SettingsForm {
         }
     }
 
+    /// 保存成功后刷新脱敏提示并清空输入框 (新 key 已落到 config.toml, 屏幕上不留痕)
+    fn refresh_key(&mut self, key: &str) {
+        let (set, masked) = mask_key(key);
+        self.api_key_set = set;
+        self.api_key_masked = masked;
+        self.api_key_input.clear();
+    }
+
+    /// 输入框下方的提示: 与 Web 版文案一致
+    fn key_hint(&self) -> String {
+        if self.api_key_set {
+            format!("留空保持不变 (已设置 {})", self.api_key_masked)
+        } else {
+            "未设置, 请填入".to_string()
+        }
+    }
+
     /// 解析回 LlmConfig: 解析不了/留空的字段沿用旧值, 不让手滑清空把配置写坏
     fn to_llm(&self, old: &LlmConfig) -> LlmConfig {
         let num = |s: &str, fallback: u64| s.trim().parse::<u64>().unwrap_or(fallback);
         let price = |s: &str, fallback: f64| s.trim().parse::<f64>().unwrap_or(fallback);
         LlmConfig {
             base_url: self.base_url.trim().to_string(),
-            api_key: self.api_key.trim().to_string(),
+            // 留空 = 沿用旧 key (绝不能把已配置的 key 清成空串)
+            api_key: match self.api_key_input.trim() {
+                "" => old.api_key.clone(),
+                k => k.to_string(),
+            },
             model: self.model.trim().to_string(),
             context_length: num(&self.context_length, old.context_length),
             price_input_per_m: price(&self.price_input, old.price_input_per_m),
@@ -1163,7 +1205,17 @@ impl DesktopApp {
                 egui::Grid::new("settings-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     field(ui, "API 地址", &mut self.settings.base_url);
                     ui.end_row();
-                    field(ui, "API Key", &mut self.settings.api_key);
+                    ui.label("API Key");
+                    ui.vertical(|ui| {
+                        // 密码框 + 留空提示: 屏幕上永远只有 ***末4位, 明文 key 不进界面
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.settings.api_key_input)
+                                .password(true)
+                                .desired_width(320.0)
+                                .hint_text("留空保持不变"),
+                        );
+                        ui.label(egui::RichText::new(self.settings.key_hint()).size(11.0).color(skin::DIM));
+                    });
                     ui.end_row();
                     field(ui, "模型", &mut self.settings.model);
                     ui.end_row();
@@ -1218,6 +1270,7 @@ impl DesktopApp {
         }
         self.model = llm.model.clone();
         self.live_llm = llm.clone();
+        self.settings.refresh_key(&llm.api_key);
         let _ = self.commands.send(Command::UpdateLlm(Box::new(llm)));
         let _ = self.commands.send(Command::UpdateCurseforge(self.settings.curseforge));
     }
@@ -1527,6 +1580,52 @@ mod tests {
         }] })
     }
 
+    fn llm_stub(api_key: &str) -> LlmConfig {
+        LlmConfig {
+            base_url: "https://example.invalid/v1".to_string(),
+            api_key: api_key.to_string(),
+            model: "test-model".to_string(),
+            context_length: 32768,
+            price_input_per_m: 0.0,
+            price_output_per_m: 0.0,
+            token_budget: 0,
+            max_tool_iterations: 16,
+            thinking: None,
+        }
+    }
+
+    /// API Key 绝不进界面: 输入框不预填、表单只存脱敏串、留空保持不变
+    #[test]
+    fn settings_form_never_holds_or_prefills_plaintext_key() {
+        let secret = "sk-live-abcdef123456";
+        let llm = llm_stub(secret);
+        let form = SettingsForm::from(&llm, false);
+        assert!(form.api_key_input.is_empty(), "输入框不能预填明文 key");
+        assert!(form.api_key_set);
+        assert_eq!(form.api_key_masked, "***3456");
+        let hint = form.key_hint();
+        assert!(hint.contains("留空保持不变"), "{hint}");
+        assert!(!hint.contains("abcdef"), "提示里不能出现 key 中段: {hint}");
+
+        // 留空 = 沿用旧 key (不能把已配置的 key 清成空串)
+        assert_eq!(form.to_llm(&llm).api_key, secret);
+        // 真敲了新 key 才替换
+        let typed = SettingsForm { api_key_input: "sk-new-key".to_string(), ..SettingsForm::from(&llm, false) };
+        assert_eq!(typed.to_llm(&llm).api_key, "sk-new-key");
+
+        // 保存成功后输入框清空, 提示改成新 key 的末 4 位
+        let mut after = form;
+        after.refresh_key("sk-new-key");
+        assert!(after.api_key_input.is_empty());
+        assert_eq!(after.api_key_masked, "***-key");
+
+        // 脱敏串只留末 4 位; 空/短/非 ASCII 都不能 panic (按字符切)
+        assert_eq!(mask_key(""), (false, String::new()));
+        assert_eq!(mask_key("abc"), (true, "***".to_string()));
+        assert_eq!(mask_key("abcdefgh"), (true, "***efgh".to_string()));
+        assert_eq!(mask_key("密钥密钥密钥"), (true, "***密钥密钥".to_string()));
+    }
+
     /// 一轮完整工具调用: 工具行 → 进度行(原地更新) → 结果(染色+撤进度, 卡片先攒着) →
     /// 流式回复 → 收尾统一铺一屏卡片
     #[test]
@@ -1751,17 +1850,7 @@ mod tests {
     fn full_window_frame_renders_with_and_without_settings_modal() {
         let (cmd_tx, _cmd_rx) = mpsc::channel();
         let (_ev_tx, ev_rx) = mpsc::channel();
-        let llm = LlmConfig {
-            base_url: "https://example.invalid/v1".to_string(),
-            api_key: "sk-test".to_string(),
-            model: "test-model".to_string(),
-            context_length: 32768,
-            price_input_per_m: 0.0,
-            price_output_per_m: 0.0,
-            token_budget: 0,
-            max_tool_iterations: 16,
-            thinking: None,
-        };
+        let llm = llm_stub("sk-test");
         let temp = std::env::temp_dir();
         let mut app = DesktopApp::new(
             cmd_tx,
