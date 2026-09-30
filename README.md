@@ -8,6 +8,10 @@
   <img src="rustagent.png" width="800">
 </div>
 
+<div align="center">
+  <img src="run.png" width="800">
+</div>
+
 ## 它解决什么问题
 
 - **找 mod 靠大海捞针**：现有整合包玩腻了，不知道还有什么好玩的 mod。ModSmith 根据你的口味描述自动搜索并给出候选清单，你只负责挑选。
