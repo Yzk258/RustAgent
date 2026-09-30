@@ -80,15 +80,20 @@ pub async fn serve(cfg: Config, config_path: &str, auto_open: bool) -> Result<()
     if copy_to_clipboard(&url) {
         println!("(地址已复制到剪贴板)");
     }
-    if auto_open {
-        // 先复制地址, 再交给系统默认浏览器。两者都是尽力而为 ——
-        // 进程被降权(低 IL)或浏览器已以管理员身份运行时, 系统按 UIPI 拒绝跨完整性级别的
-        // 单例转发, 表现是浏览器自己弹"未响应/现有实例正在以提升的权限运行";
-        // 那次失败发生在浏览器进程内部, 我们拿不到错误码, 所以只能把地址给到用户手动粘贴。
-        open_browser(&url);
-        println!("已尝试自动打开浏览器; 界面没弹出时多在浏览器地址栏粘贴上面的地址即可");
-    } else {
+    let rid = integrity_rid();
+    if !auto_open {
         println!("(--no-browser: 请在浏览器地址栏粘贴上面的地址)");
+    } else if should_skip_auto_open(rid) {
+        // 低 IL 下这条转发必然被 UIPI 拒绝: 浏览器会自己弹一个 Windows 对话框
+        // ("未响应 / 现有实例正在以提升的权限运行"), 我们收不到错误码。既然注定失败就别做。
+        println!(
+            "(本进程完整性级别 {}: 系统会拒绝跨级别转交 URL, 已跳过自动打开浏览器 —— 请在浏览器地址栏粘贴上面的地址)",
+            integrity_label(rid)
+        );
+    } else {
+        // 尽力而为: 失败发生在浏览器进程内部, 这里拿不到错误码, 所以只提示用户手动粘贴
+        open_browser(&url);
+        println!("已尝试自动打开浏览器; 界面没弹出时在浏览器地址栏粘贴上面的地址即可");
     }
     println!("按 Ctrl+C 停止服务器");
 
@@ -182,6 +187,7 @@ async fn js_response(body: &'static str) -> Response {
 
 /// 尝试用系统默认浏览器打开页面。注意这是"尽力而为": `cmd /C start` 自身总会成功返回,
 /// 真正的失败 (跨完整性级别的单例转发被 UIPI 拒绝) 发生在浏览器进程内部并弹窗, 这里看不到。
+/// 所以低 IL 由 `should_skip_auto_open()` 提前拦掉, 不指望这个函数报错。
 fn open_browser(url: &str) {
     #[cfg(windows)]
     let _ = std::process::Command::new("cmd")
@@ -189,6 +195,110 @@ fn open_browser(url: &str) {
         .spawn();
     #[cfg(not(windows))]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+/// SECURITY_MANDATORY_MEDIUM_RID (Windows 完整性级别里的"中")
+const SECURITY_MANDATORY_MEDIUM_RID: u32 = 0x2000;
+
+/// Windows 令牌完整性级别 (MIC) 的最小 FFI —— 只用 kernel32/advapi32 的 6 个函数,
+/// 不引第三方依赖 (整个项目对 Win32 的依赖只到 `std::process::Command` 这一层)。
+#[cfg(windows)]
+mod win_mic {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn OpenProcessToken(process: *mut c_void, desired_access: u32, token: *mut *mut c_void) -> i32;
+        fn GetTokenInformation(
+            token: *mut c_void,
+            class: u32,
+            info: *mut c_void,
+            len: u32,
+            ret_len: *mut u32,
+        ) -> i32;
+        fn GetSidSubAuthorityCount(sid: *mut c_void) -> *mut u8;
+        fn GetSidSubAuthority(sid: *mut c_void, index: u32) -> *mut u32;
+    }
+
+    const TOKEN_QUERY: u32 = 0x0008;
+    const TOKEN_INTEGRITY_LEVEL: u32 = 25;
+
+    /// 当前进程完整性级别 RID: 0=Untrusted, 0x1000=Low, 0x2000=Medium, 0x3000=High。
+    /// 读不到返回 None (调用方按"正常"处理, 不改变默认行为)。
+    pub fn current_rid() -> Option<u32> {
+        unsafe {
+            let mut token: *mut c_void = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return None;
+            }
+            let mut len: u32 = 0;
+            GetTokenInformation(token, TOKEN_INTEGRITY_LEVEL, std::ptr::null_mut(), 0, &mut len);
+            if len == 0 {
+                CloseHandle(token);
+                return None;
+            }
+            // 用 usize 缓冲保证对齐: TOKEN_MANDATORY_LABEL 的第一个成员就是 SID 指针
+            let word = std::mem::size_of::<usize>();
+            let words = len as usize / word + 1;
+            let mut buf = vec![0usize; words];
+            let ok = GetTokenInformation(
+                token,
+                TOKEN_INTEGRITY_LEVEL,
+                buf.as_mut_ptr() as *mut c_void,
+                (words * word) as u32,
+                &mut len,
+            );
+            CloseHandle(token);
+            if ok == 0 {
+                return None;
+            }
+            let sid = *(buf.as_ptr() as *const *mut c_void);
+            if sid.is_null() {
+                return None;
+            }
+            let count = *GetSidSubAuthorityCount(sid) as u32;
+            if count == 0 {
+                return None;
+            }
+            Some(*GetSidSubAuthority(sid, count - 1))
+        }
+    }
+}
+
+/// 当前进程的完整性级别 RID (非 Windows 恒为 None)
+fn integrity_rid() -> Option<u32> {
+    #[cfg(windows)]
+    {
+        win_mic::current_rid()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// RID → 给人看的名字 (只用于启动时那行提示, 让用户一眼看出自己被降权了)
+fn integrity_label(rid: Option<u32>) -> &'static str {
+    match rid {
+        Some(0) => "Untrusted",
+        Some(0x1000) => "Low",
+        Some(0x2000) => "Medium",
+        Some(0x3000) => "High",
+        Some(0x4000) => "System",
+        _ => "未知",
+    }
+}
+
+/// 低于 Medium 就跳过"自动打开浏览器": UIPI 会拒绝这种跨完整性级别的单例转发,
+/// 唯一结果就是浏览器弹一个"未响应"的 Windows 对话框 (实测: 低 IL 沙箱 + 已运行的 Edge)。
+/// 读不到级别时返回 false —— 宁可照常尝试, 也不因为一次探测失败就不给用户开界面。
+fn should_skip_auto_open(rid: Option<u32>) -> bool {
+    rid.is_some_and(|r| r < SECURITY_MANDATORY_MEDIUM_RID)
 }
 
 /// 把地址写进剪贴板 (尽力而为, 失败返回 false)。走系统自带的 clip.exe, 不引入新依赖;
@@ -218,7 +328,7 @@ fn copy_to_clipboard(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::auto_open_enabled;
+    use super::{auto_open_enabled, integrity_label, integrity_rid, should_skip_auto_open};
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -231,5 +341,35 @@ mod tests {
         assert!(auto_open_enabled(&args(&["--verbose"])));
         assert!(!auto_open_enabled(&args(&["--no-browser"])));
         assert!(!auto_open_enabled(&args(&["something", "--no-browser"])));
+    }
+
+    /// 低 IL 下自动打开只会换来浏览器的一个报错对话框, 必须自动跳过
+    #[test]
+    fn auto_open_is_skipped_below_medium_integrity() {
+        assert!(should_skip_auto_open(Some(0))); // Untrusted
+        assert!(should_skip_auto_open(Some(0x1000))); // Low
+        assert!(!should_skip_auto_open(Some(0x2000))); // Medium: 照常打开
+        assert!(!should_skip_auto_open(Some(0x3000))); // High
+        assert!(!should_skip_auto_open(None)); // 探测失败时不改变默认行为
+    }
+
+    #[test]
+    fn integrity_labels_are_human_readable() {
+        assert_eq!(integrity_label(Some(0)), "Untrusted");
+        assert_eq!(integrity_label(Some(0x1000)), "Low");
+        assert_eq!(integrity_label(Some(0x2000)), "Medium");
+        assert_eq!(integrity_label(Some(0x3000)), "High");
+        assert_eq!(integrity_label(None), "未知");
+    }
+
+    /// 真读一次本进程: 证明那段 FFI 不会崩, 且拿到的是已知的级别值
+    #[test]
+    #[cfg(windows)]
+    fn current_integrity_level_is_readable() {
+        let rid = integrity_rid().expect("Windows 上应当能读到本进程的完整性级别");
+        assert!(
+            matches!(rid, 0 | 0x1000 | 0x2000 | 0x3000 | 0x4000),
+            "意外的完整性级别 RID: {rid:#x}"
+        );
     }
 }
