@@ -63,7 +63,7 @@ port = 1780                                # Web 界面端口 (cargo run -- ui)
 
 ### 启动方式
 
-RustAgent 有三种使用方式，配置只需做一次，按需选择：
+RustAgent 有四种使用方式，配置只需做一次，按需选择：
 
 **方式一：命令行交互模式（开发/调试常用）**
 
@@ -91,7 +91,15 @@ cargo run -- ui
 
 启动后浏览器自动打开本地 Web 界面（默认 http://127.0.0.1:1780，端口在 `config.toml` 的 `[ui]` 段配置）。界面功能详见下方 [Web 界面](#web-界面) 章节。
 
-**方式三：双击桌面图标（不想每次启动碰命令行）**
+**方式三：桌面原生界面（不想开浏览器，也不想留一个控制台窗口）**
+
+```bash
+cargo run -- desktop
+```
+
+直接弹出一个原生窗口，**界面格式与 Web 版一致**（顶栏 + 侧栏卡片 + 头像/气泡对话 + 📦 mod 卡片 + 预设栏/输入栏），配色逐项取自 `src/ui/static/style.css` 的深色主题；对应关系见下方 [桌面界面](#桌面界面) 章节。与 Web 版的差别只在渲染层：桌面版把 `AgentEvent` 直接画进窗口，**不启 HTTP 服务、不打开浏览器**，一个进程就是一个应用。`config.toml`、`userdata/`（会话存档、口味库、整合包）与 Web 版完全共用，两边看到的是同一份数据；同一时刻只用一边即可，避免两个进程同时写同一个会话存档。
+
+**方式四：双击桌面图标（不想每次启动碰命令行）**
 
 配置完成后日常只需双击桌面图标即可进入 Web 界面，全程不碰命令行。
 
@@ -133,6 +141,7 @@ cargo run -- ui
 ```bash
 cargo run -- selftest                 # 不耗 LLM token 的自检: 测试 Modrinth 搜索、四种加载器版本获取与组包、校验 .mrpack 格式
 cargo run -- ui                       # 启动 Web 界面 (默认 http://127.0.0.1:1780, 自动打开浏览器)
+cargo run -- desktop                  # 启动原生桌面界面 (egui, 不启 HTTP 服务、不开浏览器)
 cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # 向已生成的整合包补入指定 mod
 ```
 
@@ -152,6 +161,36 @@ cargo run -- repair "{\"pack_name\":\"包名\",\"add_slugs\":[\"sodium\"]}"  # �
 - **主题切换**：顶栏太阳/月亮按钮可切换白天模式与黑夜模式，选择会保存在浏览器中，下次打开自动恢复。
 - **界面视觉**：深色渐变 + 玻璃拟态风格；欢迎页提供可一键填入的示例需求，消息带双方头像，工具调用以彩色胶囊展示，宽屏下对话保持舒适阅读宽度。
 - 界面以静态三件套（HTML/CSS/JS）内嵌进二进制，单文件即可分发，无需额外部署前端。
+
+## 桌面界面
+
+`cargo run -- desktop` 打开原生窗口（egui/eframe 渲染）。它不是 Web 版的另一套实现，而是**同一套界面格式换一个渲染层**：数据来源、事件流、配置与会话存档都与 Web 版共用，区别只是把 `AgentEvent` 直接画进窗口、不经过 HTTP。
+
+| Web 版 (`src/ui/static/*`)                | 桌面版 (`src/desktop.rs`)               | 说明                                                                                     |
+| ----------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `#topbar` 品牌 / 模型 / 状态 / ⚙           | `ui_topbar()`                           | 版本号、当前模型、绿(就绪)/黄(处理中)状态点                                              |
+| 侧栏 `.card`：会话 / 统计 / 整合包 / 工具 | `ui_sidebar()` + `card()`               | 数据同源：`api::packs` ↔ `scan_packs()`、`/api/profile` ↔ `load_taste()`、`/api/tools` ↔ `ToolRegistry::defs()` |
+| `.msg-row` 头像 + 气泡                    | `bubble()`                              | 用户靠右（强调色底）、助手靠左（气泡色底）、提示为灰色小卡                                |
+| `⚙ 调用工具 x …` → `⚙ x 完成/失败`       | `Msg::Tool` + `draw_messages()`         | 黄 → 绿/红，同一工具行原地更新                                                           |
+| `⏳ ▰▰▱▱ 3/8 …`                          | `Msg::Progress` + `progress_prefix()`   | 同一次工具调用内原地刷新，工具结果一到就撤行                                              |
+| 📦 mod 卡片（图标/标题链接/描述/下载量/分类） | `Msg::Cards` + `mod_card()`             | `extract_mods()` 的 JSON 约定与前端 `extractMods` 相同（search_mods 与 build_modpack 两种形状都吃） |
+| `#presetbar` 版本 / 加载器 / 数量          | `ui_input()` 上半                      | 复用同一个 `pipeline::preset_prefix()` 生成 `[界面预设: …]` 前缀                          |
+| 输入栏 + ⏸ 打断                           | `ui_input()` 下半                      | Enter 发送、Shift+Enter 换行，处理中变成"打断"                                           |
+| 设置弹窗 ⚙                                | `ui_settings()`                         | 字段一致；保存走 `config::save_llm()` 写回 `config.toml` 并热更新 agent（不重启）          |
+| `handleEvent()` 事件分发                  | `Chat::apply()`                         | 顺序规则对齐：工具调用后另起气泡、进度行用完即撤、`reply` 完整文本覆盖流式累积            |
+
+有意保留的差异（避免重复造轮子）：
+
+- **Markdown**：助手回复按纯文本渲染（Web 版走 marked.js），代码块/列表原样显示，不做富文本排版；
+- **图片**：mod 图标位是 📦 占位块，截图只显示张数，点标题跳 Modrinth 官网看（不引入联网图片解码依赖）；
+- **"试试这个"推荐卡、会话记录导入列表、白天/黑夜主题切换**：目前只在 Web 版提供；
+- **中文字体**：启动时从系统字体（微软雅黑 / 黑体 / 等线 / 宋体）自动挑一个装进 egui；`C:\Windows\Fonts` 里一个都读不到时中文会显示成方框，但不影响运行。
+
+`Chat::apply()` 是上述顺序规则的唯一出处 —— 改动它请同步改 `src/ui/static/app.js` 的 `handleEvent()`。它和无窗口渲染都有测试兜底：
+
+```bash
+cargo test --lib desktop::    # 消息组装规则 + 下载量/进度条格式 + 无窗口排版一帧(含 mod 卡片网格)
+```
 
 ## 生成物说明
 
@@ -179,7 +218,7 @@ agent 通过函数调用（tool calling）驱动以下工具，所有 mod 数据
 ```
 src/
 ├── lib.rs        # 库入口: 模块组织 + prelude (anyhow/serde/Arc 等高频导入集中)
-├── main.rs       # 二进制入口: 子命令分发 (selftest / ui / repair)
+├── main.rs       # 二进制入口: 子命令分发 (selftest / ui / desktop / repair)
 ├── selftest.rs   # selftest 子命令: 不耗 LLM token 的自检 (真网访问 Modrinth)
 ├── cli.rs        # CLI: 交互式 REPL 主循环 + 圆角横幅、ANSI 配色、CJK 宽度对齐、进度条
 ├── agent/        # Agent 主循环: LLM 对话、工具调度、上下文裁剪、预算、打断与进展
@@ -201,7 +240,8 @@ src/
 │   ├── database.rs   # 用户口味数据库 (SQLite)
 │   └── history.rs    # 会话保存/加载 (含轮内检查点自动保存)
 ├── config.rs     # config.toml 解析、启动校验与设置写回
-└── ui/           # Web 界面: axum 服务器 + REST/流式 API + 内嵌前端三件套
+├── ui/           # Web 界面: axum 服务器 + REST/流式 API + 内嵌前端三件套
+└── desktop.rs    # 原生桌面界面 (egui/eframe): 与 Web 版同一套格式的另一渲染层
 
 userdata/          # 运行时用户数据 (首次运行自动创建)
 ├── userdata.db    # 口味数据库
