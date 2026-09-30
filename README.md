@@ -109,7 +109,7 @@ cargo run -- desktop
    cargo build --release
    ```
 
-   完成后 `target\release\rustagent.exe` 就是主程序（约 9 MB）。
+   完成后 `target\release\rustagent.exe` 就是主程序（约 17 MB，其中 egui 桌面界面占约 8 MB）。
 2. **创建桌面快捷方式**（一次性）：
 
    1. 右键 `target\release\rustagent.exe` → **发送到** → **桌面快捷方式**；
