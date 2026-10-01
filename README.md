@@ -1,16 +1,24 @@
 # ModSmith
 
+<p align="center">
+  <img src="modsmith-cover-dark.png" alt="ModSmith · Minecraft 模组管理 Agent，用自然语言直接组出可玩的整合包" width="100%">
+</p>
+
 > 原名 **RustAgent**，2026-09 起正式定名为 **ModSmith**。数据目录（`userdata/`）与 `config.toml` 的字段名都没变，旧目录可以直接沿用，不需要迁移。
 
 一款用 Rust 编写的 **Minecraft 模组管理 Agent**：你用自然语言描述想要什么（版本、加载器、玩法偏好），它替你去 Modrinth 搜索、筛选、组包，最后生成一个可以直接拖进启动器（如 PCL2）安装的 `.mrpack` 整合包文件。
 
-<div align="center">
-  <img src="modsmith.png" width="800">
-</div>
+封面（上图）由 `assets/cover/make-cover.ps1` 生成：`powershell -File assets/cover/make-cover.ps1 -Theme dark`。配色令牌与 Web/桌面界面同源（`src/ui/static/style.css` 的 `:root`），所以封面和实际界面是同一套视觉语言；`-Theme emerald|light|all` 可出其余配色。
 
-<div align="center">
-  <img src="run.png" width="800">
-</div>
+## 界面预览
+
+<p align="center">
+  <img src="modsmith.png" alt="Web 界面：侧栏工具与会话面板 + 中间对话区" width="800">
+</p>
+
+<p align="center">
+  <img src="run.png" alt="命令行运行时的工具调用输出" width="800">
+</p>
 
 ## 它解决什么问题
 

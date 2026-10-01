@@ -1,0 +1,62 @@
+{
+  "_comment": "封面全部文案 (与 PowerShell 脚本分离: Windows PowerShell 5.1 用 ANSI 解码 .ps1, 内联中文会被截断, 所以脚本保持纯 ASCII, 文案放这里用 ReadAllText(UTF8) 读)。",
+
+  "badge": "Rust 打造的 Minecraft 模组管理 Agent",
+  "wordmark": "ModSmith",
+  "subtitle": "MINECRAFT MODPACK AGENT  ·  BUILT IN RUST",
+
+  "taglineHead": "说一句话，",
+  "taglineGrad": "整合包",
+  "taglineTail": "就组好了。",
+
+  "desc": "用自然语言描述你想要的版本、加载器与玩法，它去 Modrinth 搜真实存在的 mod、自动补全前置依赖、检测冲突，最后产出一个 .mrpack —— 拖进 PCL2 就能玩。",
+
+  "chips": ["自然语言组包", "口味越用越准", "从不瞎编 mod"],
+
+  "_mock": "右侧面板 1:1 对应 src/ui/static/index.html 的真实结构: #topbar(brand/.ver/.model/.status) -> #messages(.welcome/.msg-row/.tool-line/.mod-cards) -> #presetbar(版本+加载器段控件) -> #inputbar(textarea+#btn-send)。改这里的文案等于改界面截图。",
+
+  "mockBrand": "ModSmith · MC 模组管理助手",
+  "mockVersion": "v0.2.0",
+  "mockModel": "deepseek-v4",
+  "mockStatus": "已连接",
+  "mockWelcome": "想组什么样的整合包？",
+  "mockWelcomeHint": "说清版本、加载器和玩法就行，剩下的交给它",
+  "userMsg": "1.21.1 fabric 生存整合包，带点探索和装饰",
+
+  "tools": [
+    { "name": "search_mods",   "arg": "1.21.1 / fabric",     "state": "ok" },
+    { "name": "build_modpack", "arg": "解析依赖闭包",         "state": "pending" }
+  ],
+
+  "progressBar": "▰▰▰▰▰▰▱▱",
+  "progressText": "正在解析依赖闭包",
+
+  "assistantMsg": "按你的口味挑了 8 个，冲突已排掉",
+  "modListHead": "search_mods · 已加入整合包的 mod",
+  "mods": [
+    { "icon": "Tr", "title": "Terralith", "slug": "terralith",  "desc": "原版地形生成重做，加了一百多个新生物群系", "dl": "18.7M" },
+    { "icon": "So", "title": "Sodium",    "slug": "sodium",     "desc": "渲染管线重写，帧数通常翻倍",               "dl": "42.1M" },
+    { "icon": "Li", "title": "Lithium",   "slug": "lithium",    "desc": "服务端与客户端逻辑优化，不改玩法",         "dl": "31.4M" },
+    { "icon": "Ch", "title": "Chipped",   "slug": "chipped",    "desc": "给每种方块加了大量装饰变体",               "dl": "9.8M" }
+  ],
+
+  "labelVersion": "版本",
+  "labelLoader": "加载器",
+  "mockVersionInput": "1.21.1",
+  "loaders": ["fabric", "forge", "neoforge", "quilt"],
+  "inputPlaceholder": "描述你想要的整合包…",
+  "sendLabel": "发送",
+
+  "cards": [
+    { "key": "TECH STACK",  "v1": "Rust", "v2": "egui 桌面端 · axum Web", "hl1": true, "mono1": false },
+    { "key": "加载器支持",   "pills": ["fabric", "forge", "neoforge", "quilt"] },
+    { "key": "MOD 数据源",   "v1": "Modrinth API 实时", "v2": "CurseForge 可选", "hl1": true, "mono1": false },
+    { "key": "本地界面",     "v1": "http://127.0.0.1:1780", "v2": null, "hl1": false, "mono1": true }
+  ],
+
+  "glyphGear": "⚙",
+  "glyphPack": "📦",
+  "glyphPick": "⛏",
+  "glyphSun": "☀",
+  "glyphSpark": "✦"
+}

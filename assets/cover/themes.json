@@ -1,0 +1,78 @@
+{
+  "_comment": "ModSmith 封面配色变体。令牌名与 src/ui/static/style.css 的 CSS 变量一一对应; g1/g2 是 SVG 渐变用的字面色 (模板里写作 var(--g1)/var(--g2))。",
+  "order": ["dark", "emerald", "light"],
+  "themes": {
+    "dark": {
+      "class": "dark",
+      "tokens": {
+        "--bg": "#0d0f14",
+        "--bg-card": "#161a22",
+        "--bg-raise": "#1b202b",
+        "--bg-bubble": "#1d2330",
+        "--border": "#262d3a",
+        "--border-soft": "rgba(255,255,255,.06)",
+        "--text": "#e9ecf2",
+        "--text-dim": "#8a93a6",
+        "--accent": "#6d8dff",
+        "--accent-bright": "#93abff",
+        "--accent-soft": "rgba(109,141,255,.14)",
+        "--grad": "linear-gradient(135deg,#5b8cff,#8b5cf6)",
+        "--g1": "#5b8cff",
+        "--g2": "#8b5cf6",
+        "--green": "#34d399",
+        "--yellow": "#fbbf24",
+        "--panel": "rgba(21,24,32,.82)",
+        "--shadow": "0 30px 70px rgba(0,0,0,.55)",
+        "--grid": "rgba(255,255,255,.035)"
+      }
+    },
+    "emerald": {
+      "class": "dark",
+      "tokens": {
+        "--bg": "#0b1210",
+        "--bg-card": "#131c19",
+        "--bg-raise": "#18231f",
+        "--bg-bubble": "#1a2723",
+        "--border": "#23332d",
+        "--border-soft": "rgba(255,255,255,.06)",
+        "--text": "#e7f2ec",
+        "--text-dim": "#86988f",
+        "--accent": "#4ade9e",
+        "--accent-bright": "#7ff0bd",
+        "--accent-soft": "rgba(52,211,153,.15)",
+        "--grad": "linear-gradient(135deg,#34d399,#3b82f6)",
+        "--g1": "#34d399",
+        "--g2": "#22a06b",
+        "--green": "#34d399",
+        "--yellow": "#fbbf24",
+        "--panel": "rgba(19,28,25,.82)",
+        "--shadow": "0 30px 70px rgba(0,0,0,.55)",
+        "--grid": "rgba(255,255,255,.035)"
+      }
+    },
+    "light": {
+      "class": "light",
+      "tokens": {
+        "--bg": "#f4f6fa",
+        "--bg-card": "#ffffff",
+        "--bg-raise": "#eef1f6",
+        "--bg-bubble": "#e9eef8",
+        "--border": "#d7ddea",
+        "--border-soft": "rgba(25,35,55,.10)",
+        "--text": "#1b2333",
+        "--text-dim": "#68738a",
+        "--accent": "#4169d8",
+        "--accent-bright": "#3155bd",
+        "--accent-soft": "rgba(65,105,216,.12)",
+        "--grad": "linear-gradient(135deg,#4169d8,#8b5cf6)",
+        "--g1": "#4169d8",
+        "--g2": "#8b5cf6",
+        "--green": "#16845b",
+        "--yellow": "#a66b00",
+        "--panel": "rgba(255,255,255,.88)",
+        "--shadow": "0 24px 60px rgba(30,45,80,.16)",
+        "--grid": "rgba(25,35,55,.045)"
+      }
+    }
+  }
+}

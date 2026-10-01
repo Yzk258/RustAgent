@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ModSmith Cover 16:9</title>
+<style>
+  /* ============================================================
+     ModSmith 封面模板 (1920x1080, 16:9)
+     配色全部取自 src/ui/static/style.css 的设计令牌:
+       --bg #0d0f14 / --bg-card #161a22 / --border #262d3a
+       --text #e9ecf2 / --text-dim #8a93a6 / --accent #6d8dff
+       --grad linear-gradient(135deg,#5b8cff,#8b5cf6) / --radius 14px
+     变体切换: 在 URL 后加 ?theme=violet | emerald | light
+     ============================================================ */
+
+  :root {
+    --bg:            #0d0f14;
+    --bg-card:       #161a22;
+    --bg-raise:      #1b202b;
+    --bg-bubble:     #1d2330;
+    --border:        #262d3a;
+    --border-soft:   rgba(255,255,255,.06);
+    --text:          #e9ecf2;
+    --text-dim:      #8a93a6;
+    --accent:        #6d8dff;
+    --accent-bright: #93abff;
+    --accent-soft:   rgba(109,141,255,.14);
+    --grad:          linear-gradient(135deg,#5b8cff,#8b5cf6);
+    --g1:            #5b8cff;
+    --g2:            #8b5cf6;
+    --green:         #34d399;
+    --yellow:        #fbbf24;
+    --panel:         rgba(21,24,32,.82);
+    --shadow:        0 30px 70px rgba(0,0,0,.55);
+    --grid:          rgba(255,255,255,.035);
+  }
+
+  /* 变体配色不写在这里: 渲染脚本从 themes.json / make-cover.ps1 的 $palettes
+     读出令牌, 以 <style>html.dark|html.light{...}</style> 注入到 </head> 前。
+     这样配色只有一份真相, 令牌名与 src/ui/static/style.css 的 :root 一致。 */
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body { width: 1920px; height: 1080px; overflow: hidden; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "Segoe UI", "PingFang SC", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  /* ---------- 背景层 ---------- */
+  .bg-grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 64px 64px;
+    -webkit-mask-image: radial-gradient(ellipse 78% 72% at 62% 42%, #000 30%, transparent 100%);
+            mask-image: radial-gradient(ellipse 78% 72% at 62% 42%, #000 30%, transparent 100%);
+  }
+  .glow { position: absolute; border-radius: 50%; filter: blur(120px); opacity: .5; }
+  .glow-1 { width: 900px; height: 900px; left: -260px; top: -320px;  background: var(--g1); opacity: .30; }
+  .glow-2 { width: 820px; height: 820px; right: -180px; top: 60px;   background: var(--g2); opacity: .30; }
+  .glow-3 { width: 700px; height: 700px; left: 46%; bottom: -420px;  background: var(--g1); opacity: .16; }
+  .vignette {
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse 105% 95% at 50% 45%, transparent 42%, rgba(0,0,0,.55) 100%);
+  }
+  html[data-theme="light"] .vignette { display: none; }
+
+  /* 顶部渐变条: 呼应 UI 的渐变强调色 */
+  .topline { position: absolute; top: 0; left: 0; right: 0; height: 6px; background: var(--grad); }
+
+  /* 大号水印方块: 装饰性像素块 */
+  .deco { position: absolute; border-radius: 8px; opacity: .1; }
+
+  /* ---------- 版式骨架 ---------- */
+  .wrap {
+    position: relative;
+    width: 1920px; height: 1080px;
+    padding: 66px 96px 0;
+    display: flex; flex-direction: column;
+  }
+
+  .main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 950px 1fr;
+    gap: 56px;
+    align-items: center;
+    padding-bottom: 8px;
+  }
+
+  /* =================== 左侧: 品牌区 =================== */
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 12px;
+    align-self: flex-start;
+    padding: 11px 22px 11px 16px;
+    border: 1px solid var(--border);
+    background: var(--accent-soft);
+    border-radius: 999px;
+    font-size: 20px; font-weight: 700; letter-spacing: .4px;
+    color: var(--accent-bright);
+    margin-bottom: 30px;
+  }
+  .eyebrow .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 14px var(--green);
+  }
+
+  .logo-row { display: flex; align-items: center; gap: 30px; }
+
+  h1.wordmark {
+    font-size: 148px;
+    line-height: .92;
+    font-weight: 800;
+    letter-spacing: -3px;
+    background: var(--grad);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    padding-right: 10px;
+  }
+
+  .sub-en {
+    margin-top: 14px;
+    font-size: 30px; font-weight: 600; letter-spacing: 3px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .sub-en b { color: var(--text); font-weight: 700; letter-spacing: 3px; }
+
+  .rule {
+    width: 132px; height: 5px; border-radius: 3px;
+    background: var(--grad); margin: 34px 0 30px;
+  }
+
+  .tagline {
+    font-size: 42px; font-weight: 700; line-height: 1.42;
+    letter-spacing: -.5px;
+  }
+  .tagline em {
+    font-style: normal;
+    background: var(--grad);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+  }
+  .desc {
+    margin-top: 20px;
+    font-size: 23px; line-height: 1.72; color: var(--text-dim);
+    max-width: 880px;
+  }
+  .desc code, .mono {
+    font-family: Consolas, "Cascadia Code", ui-monospace, monospace;
+    font-size: .94em;
+    padding: 2px 8px; border-radius: 6px;
+    background: rgba(127,145,190,.16);
+    color: var(--accent-bright);
+  }
+
+  .chips { display: flex; gap: 14px; margin-top: 32px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 12px 20px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    font-size: 19px; font-weight: 600; color: var(--text);
+  }
+  .chip i {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 10px var(--accent); flex: none;
+  }
+
+  /* =================== 右侧: 产品界面模拟 =================== */
+  .stage { position: relative; display: flex; justify-content: center; align-items: center; }
+
+  .mock {
+    position: relative;
+    width: 100%; max-width: 780px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    box-shadow: var(--shadow), 0 0 0 1px var(--border-soft) inset;
+    backdrop-filter: blur(14px);
+    overflow: hidden;
+  }
+  .mock-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 15px 18px;
+    background: var(--bg-raise);
+    border-bottom: 1px solid var(--border);
+  }
+  .mock-bar .lamp { width: 13px; height: 13px; border-radius: 50%; }
+  .lamp.r { background: #ff5f57; } .lamp.y { background: #febc2e; } .lamp.g { background: #28c840; }
+  .mock-title {
+    margin-left: 8px;
+    font-size: 16.5px; font-weight: 700; color: var(--text-dim);
+    letter-spacing: .2px;
+  }
+  .mock-title b { color: var(--text); }
+  .mock-bar .ver {
+    margin-left: auto;
+    font-size: 14.5px; font-weight: 700;
+    color: var(--accent-bright);
+    background: var(--accent-soft);
+    border: 1px solid var(--border);
+    padding: 5px 12px; border-radius: 999px;
+  }
+
+  .mock-body { padding: 22px 24px 24px; font-size: 18.5px; line-height: 1.62; }
+
+  .row { display: flex; gap: 11px; }
+  .who {
+    flex: none; width: 30px; height: 30px; border-radius: 9px;
+    display: grid; place-items: center;
+    font-size: 15px; font-weight: 800; color: #fff;
+  }
+  .who.me { background: var(--grad); }
+  .who.ai { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid var(--border); }
+
+  .bubble {
+    background: var(--bg-bubble);
+    border: 1px solid var(--border-soft);
+    border-radius: 13px;
+    padding: 12px 16px;
+  }
+
+  .prompt-line { display: flex; gap: 12px; align-items: flex-start; }
+  .caret { color: var(--accent); font-weight: 800; font-size: 21px; line-height: 1.35; }
+  .typed { color: var(--text); font-weight: 600; }
+
+  .tool {
+    display: flex; align-items: center; gap: 11px;
+    margin: 7px 0;
+    padding: 10px 15px;
+    border-radius: 11px;
+    border: 1px solid var(--border);
+    background: var(--bg-raise);
+    font-size: 17.5px;
+  }
+  .tool .name { font-family: Consolas, ui-monospace, monospace; color: var(--accent-bright); font-weight: 700; }
+  .tool .state { margin-left: auto; font-size: 16px; font-weight: 700; }
+  .tool .state.ok { color: var(--green); }
+  .tool .state.run { color: var(--yellow); }
+
+  .prog {
+    display: flex; align-items: center; gap: 12px;
+    margin: 7px 0 7px 4px;
+    font-size: 17px; color: var(--text-dim);
+  }
+  .bar { color: var(--accent); font-family: Consolas, monospace; letter-spacing: 1.5px; font-size: 18px; }
+  .pct { color: var(--text); font-weight: 700; }
+
+  .modlist { margin-top: 14px; display: flex; flex-direction: column; gap: 9px; }
+  .modlist-hd {
+    font-size: 15.5px; font-weight: 800; letter-spacing: .6px;
+    color: var(--text-dim); text-transform: uppercase;
+    display: flex; align-items: center; gap: 9px;
+  }
+  .modlist-hd .num {
+    color: #fff; background: var(--grad);
+    border-radius: 999px; padding: 2px 10px; font-size: 15px;
+  }
+  html[data-theme="light"] .modlist-hd .num { color: #fff; }
+
+  .mod {
+    display: flex; align-items: center; gap: 13px;
+    padding: 11px 15px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    border-radius: 12px;
+  }
+  .mi {
+    flex: none; width: 38px; height: 38px; border-radius: 10px;
+    display: grid; place-items: center;
+    font-size: 15px; font-weight: 800; color: #cfd8ff;
+    background: linear-gradient(135deg, rgba(91,140,255,.30), rgba(139,92,246,.30));
+    border: 1px solid var(--border);
+  }
+  .mod .mt { font-size: 18px; font-weight: 700; }
+  .mod .ms { font-family: Consolas, ui-monospace, monospace; font-size: 14.5px; color: var(--text-dim); }
+  .mod .md {
+    margin-left: auto; text-align: right;
+    font-family: Consolas, ui-monospace, monospace;
+    font-size: 16px; font-weight: 700; color: var(--green);
+  }
+  .mod .dl { display: block; font-size: 13px; font-weight: 600; color: var(--text-dim); }
+
+  /* 浮动徽章 */
+  .float {
+    position: absolute;
+    display: flex; align-items: center; gap: 11px;
+    padding: 13px 20px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 16px 40px rgba(0,0,0,.42);
+    font-size: 18px; font-weight: 700;
+    z-index: 3;
+  }
+  .float .ic { font-size: 21px; }
+  .float small { display: block; font-size: 14px; font-weight: 600; color: var(--text-dim); letter-spacing: .3px; }
+  .float.mrpack { right: -30px; top: 44px; }
+  .float.packs  { right: 34px; bottom: -22px; }
+
+  /* =================== 底部: 元信息 =================== */
+  .foot {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 18px;
+    padding: 24px 0 26px;
+    border-top: 1px solid var(--border);
+  }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 20px;
+  }
+  .card .k {
+    font-size: 14px; font-weight: 800; letter-spacing: 1.4px;
+    color: var(--text-dim); text-transform: uppercase;
+    margin-bottom: 9px;
+  }
+  .card .v { font-size: 20px; font-weight: 700; letter-spacing: .2px; }
+  .card .v .sep { color: var(--text-dim); font-weight: 400; margin: 0 7px; }
+  .card .v .hl { color: var(--accent-bright); }
+  .pillrow { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pillrow span {
+    font-size: 15.5px; font-weight: 700;
+    padding: 5px 12px; border-radius: 8px;
+    background: var(--bg-raise); border: 1px solid var(--border);
+    color: var(--text); font-family: Consolas, ui-monospace, monospace;
+  }
+  .url {
+    font-family: Consolas, ui-monospace, monospace;
+    font-size: 19px; color: var(--accent-bright); font-weight: 700;
+  }
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="glow glow-1"></div>
+<div class="glow glow-2"></div>
+<div class="glow glow-3"></div>
+<div class="vignette"></div>
+<div class="topline"></div>
+
+<div class="deco" style="width:120px;height:120px;left:1420px;top:150px;background:var(--g1);"></div>
+<div class="deco" style="width:64px;height:64px;left:900px;bottom:230px;background:var(--g2);"></div>
+
+<div class="wrap">
+
+  <div class="main">
+
+    <!-- ================= 左: 品牌 ================= -->
+    <div class="brand">
+      <div class="eyebrow"><span class="dot"></span>Rust 打造的 Minecraft 模组管理 Agent</div>
+
+      <div class="logo-row">
+        <h1 class="wordmark">ModSmith</h1>
+        <!-- 像素风: 镐 + 草方块, 呼应 CLI 横幅的 ⛏ 与 MC 主题 -->
+        <svg width="196" height="196" viewBox="0 0 96 96" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="pick" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%"  stop-color="var(--g1)"/>
+              <stop offset="100%" stop-color="var(--g2)"/>
+            </linearGradient>
+            <linearGradient id="gTop" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%"  stop-color="#a6dd6b"/>
+              <stop offset="100%" stop-color="#79b34a"/>
+            </linearGradient>
+            <linearGradient id="dirt" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%"  stop-color="#9c7248"/>
+              <stop offset="100%" stop-color="#7d5a37"/>
+            </linearGradient>
+          </defs>
+
+          <!-- 草方块 (等距) -->
+          <g opacity="0.98">
+            <path d="M14 78 L48 58 L82 78 L48 98 Z" fill="#5f8f3a"/>
+            <path d="M14 78 L48 98 L48 142 L14 122 Z" fill="url(#dirt)"/>
+            <path d="M82 78 L48 98 L48 142 L82 122 Z" fill="#6b4c2c"/>
+            <!-- 草地层 -->
+            <path d="M14 78 L48 58 L82 78 L48 90 Z" fill="url(#gTop)"/>
+            <path d="M14 78 L48 90 L48 100 L14 88 Z" fill="#6ba341"/>
+            <path d="M82 78 L48 90 L48 100 L82 88 Z" fill="#578a34"/>
+            <!-- 像素泥土颗粒 -->
+            <rect x="21" y="96"  width="7" height="7" fill="#6b4c2c" opacity=".85"/>
+            <rect x="33" y="112" width="7" height="7" fill="#6b4c2c" opacity=".85"/>
+            <rect x="22" y="118" width="7" height="7" fill="#6b4c2c" opacity=".7"/>
+            <rect x="58" y="104" width="7" height="7" fill="#5b3f24" opacity=".8"/>
+            <rect x="68" y="120" width="7" height="7" fill="#5b3f24" opacity=".8"/>
+            <rect x="56" y="126" width="7" height="7" fill="#5b3f24" opacity=".6"/>
+          </g>
+
+          <!-- 镐 -->
+          <g transform="translate(0,-6)">
+            <path d="M50 4 C26 4 8 22 8 46 L21 46 C21 30 33 18 50 18 Z" fill="url(#pick)"/>
+            <path d="M50 4 C74 4 92 22 92 46 L79 46 C79 30 67 18 50 18 Z" fill="url(#pick)" opacity=".62"/>
+            <rect x="43" y="14" width="13" height="14" fill="var(--g2)"/>
+            <rect x="31" y="10" width="9" height="16" fill="var(--g2)"/>
+            <rect x="60" y="10" width="9" height="16" fill="var(--g2)"/>
+            <rect x="45" y="24" width="10" height="42" rx="3" fill="#a9754a"/>
+          </g>
+        </svg>
+      </div>
+
+      <div class="sub-en">Minecraft <b>Modpack Agent</b> · Built in Rust</div>
+
+      <div class="rule"></div>
+
+      <div class="tagline">
+        说一句话，<em>整合包</em>就组好了。
+      </div>
+
+      <div class="desc">
+        用自然语言描述你想要的版本、加载器与玩法，它去 <b>Modrinth</b> 搜真实存在的 mod、
+        自动补全前置依赖、检测冲突，最后产出一个
+        <code>.mrpack</code> —— 拖进 PCL2 就能玩。
+      </div>
+
+      <div class="chips">
+        <div class="chip"><i></i>自然语言组包</div>
+        <div class="chip"><i></i>口味越用越准</div>
+        <div class="chip"><i></i>从不瞎编 mod</div>
+      </div>
+    </div>
+
+    <!-- ================= 右: 界面模拟 ================= -->
+    <div class="stage">
+      <div class="mock">
+        <div class="mock-bar">
+          <span class="lamp r"></span><span class="lamp y"></span><span class="lamp g"></span>
+          <span class="mock-title"><b>ModSmith</b> · 终端交互模式</span>
+          <span class="ver">v0.2.0</span>
+        </div>
+
+        <div class="mock-body">
+          <div class="row" style="margin-bottom:12px;">
+            <div class="who me">你</div>
+            <div class="bubble prompt-line">
+              <span class="caret">❯</span>
+              <span class="typed">1.21.1 fabric 生存整合包，带点探索和装饰</span>
+            </div>
+          </div>
+
+          <div class="tool">
+            <span class="ic">⚙</span>
+            <span class="name">search_mods</span>
+            <span style="color:var(--text-dim);">facets: 1.21.1 / fabric</span>
+            <span class="state ok">✓ 找到 12 个候选</span>
+          </div>
+          <div class="tool">
+            <span class="ic">⚙</span>
+            <span class="name">build_modpack</span>
+            <span style="color:var(--text-dim);">解析依赖闭包 · 冲突检测</span>
+            <span class="state ok">✓ 完成</span>
+          </div>
+
+          <div class="prog">
+            <span class="bar">▰▰▰▰▰▰▱▱</span>
+            <span><span class="pct">6/8</span> 正在收集 sodium</span>
+          </div>
+
+          <div class="modlist">
+            <div class="modlist-hd">
+              📦 已加入整合包的 mod <span class="num">6</span>
+            </div>
+            <div class="mod">
+              <div class="mi">So</div>
+              <div><div class="mt">Sodium</div><div class="ms">sodium · fabric</div></div>
+              <div class="md">42.1M<span class="dl">下载</span></div>
+            </div>
+            <div class="mod">
+              <div class="mi">Te</div>
+              <div><div class="mt">Terralith</div><div class="ms">terralith · fabric</div></div>
+              <div class="md">18.7M<span class="dl">下载</span></div>
+            </div>
+            <div class="mod">
+              <div class="mi">Li</div>
+              <div><div class="mt">Lithium</div><div class="ms">lithium · fabric</div></div>
+              <div class="md">31.4M<span class="dl">下载</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="float mrpack">
+        <span class="ic">📦</span>
+        <span>survival-1.21.1.mrpack<small>可拖入 PCL2 直接安装</small></span>
+      </div>
+      <div class="float packs">
+        <span class="ic">⛏</span>
+        <span>四种加载器<small>fabric · forge · neoforge · quilt</small></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 底部元信息 ================= -->
+  <div class="foot">
+    <div class="card">
+      <div class="k">技术栈</div>
+      <div class="v"><span class="hl">Rust</span><span class="sep">·</span>egui 桌面端<span class="sep">·</span>axum Web</div>
+    </div>
+    <div class="card">
+      <div class="k">加载器支持</div>
+      <div class="pillrow">
+        <span>fabric</span><span>forge</span><span>neoforge</span><span>quilt</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="k">Mod 数据源</div>
+      <div class="v">Modrinth API <span class="hl">实时</span><span class="sep">·</span>CurseForge 可选</div>
+    </div>
+    <div class="card">
+      <div class="k">本地界面</div>
+      <div class="v url">http://127.0.0.1:1780</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
